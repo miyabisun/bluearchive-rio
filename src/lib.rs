@@ -4,8 +4,11 @@
 //! it reads what the opponent's dialog shows of the defense (`opponent`), to look up what
 //! stood behind it in the records; in the formation dialog (`formation`) it marks over the
 //! game (`guide`, `overlay`) the students of the attack that won most against that defense.
+//! The reading runs in a thread (`watch`) and shows in a window (`app`, `ui`, `view`) made as
+//! Aoi's.
 
 pub mod aoi;
+pub mod app;
 #[cfg(windows)]
 pub mod capture;
 pub mod formation;
@@ -13,7 +16,11 @@ pub mod guide;
 pub mod history;
 pub mod opponent;
 pub mod overlay;
+pub mod settings;
 pub mod store;
+pub mod ui;
+pub mod view;
+pub mod watch;
 
 use include_dir::{Dir, include_dir};
 use serde::Deserialize;

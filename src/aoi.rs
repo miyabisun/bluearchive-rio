@@ -33,6 +33,14 @@ pub fn latest() -> Option<PathBuf> {
     Some(dirs::document_dir()?.join("Aoi").join("aoi.yaml"))
 }
 
+/// The students held as Aoi wrote them last; why not, when its file does not read.
+pub fn held() -> Result<Vec<Held>, String> {
+    let path = latest().ok_or("ドキュメントのフォルダが分かりません")?;
+    let yaml = std::fs::read_to_string(&path)
+        .map_err(|error| format!("{} を読めません: {error}", path.display()))?;
+    roster(&yaml).map_err(|error| format!("{}: {error}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Held, roster};

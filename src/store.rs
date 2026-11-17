@@ -41,6 +41,9 @@ pub struct Kept {
 pub struct Player {
     pub id: i64,
     pub name: Option<String>,
+    /// The name as the game draws it (a PNG, see `history::Plate::png`): what the window
+    /// shows of a player the user gave no name.
+    pub plate: Vec<u8>,
 }
 
 /// A defense seen before behind a first striker and two specials: the strikers D2 to D4,
@@ -248,7 +251,8 @@ impl Store {
     pub fn battles(&self) -> rusqlite::Result<Vec<Kept>> {
         let slots: String = SLOTS.iter().map(|slot| format!(", b.{slot}")).collect();
         let mut battles = self.0.prepare(&format!(
-            "SELECT b.id, b.seen_at, b.attacker, a.name, b.defender, d.name, b.attacker_won{slots}
+            "SELECT b.id, b.seen_at, b.attacker, a.name, a.plate, b.defender, d.name, d.plate,
+                    b.attacker_won{slots}
              FROM battles b
              LEFT JOIN players a ON a.id = b.attacker
              LEFT JOIN players d ON d.id = b.defender
@@ -260,6 +264,7 @@ impl Store {
                 Ok(Player {
                     id,
                     name: row.get(at + 1)?,
+                    plate: row.get(at + 2)?,
                 })
             })
             .transpose()
@@ -277,10 +282,10 @@ impl Store {
                     id: row.get(0)?,
                     seen_at: row.get(1)?,
                     attacker: player(row, 2)?,
-                    defender: player(row, 4)?,
-                    attacker_won: row.get(6)?,
-                    attack: team(row, 7)?,
-                    defense: team(row, 13)?,
+                    defender: player(row, 5)?,
+                    attacker_won: row.get(8)?,
+                    attack: team(row, 9)?,
+                    defense: team(row, 15)?,
                 })
             })?
             .collect()

@@ -30,6 +30,17 @@ const INTERVAL: Duration = Duration::from_millis(100);
 
 type CaptureError = Box<dyn std::error::Error + Send + Sync>;
 
+/// What happens to the game's window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Seen {
+    /// The window is found and its frames come.
+    Found,
+    /// The window closed.
+    Gone,
+    /// The window is there and cannot be captured: why.
+    Failed(String),
+}
+
 /// A frame of the game's screen (its window's client area).
 pub struct Shot {
     pub image: RgbImage,
@@ -236,11 +247,39 @@ fn capture(
     Capture::start_free_threaded(settings).map_err(|err| err.to_string())
 }
 
-/// The frames of the game's window, a few a second while it is open; the window is looked
+/// Keeps Windows from running the app at efficiency speeds (`EcoQoS`) while its window is not
+/// in front: the frames then take longer to read. Aoi's GPUI window was slowed so on
+/// 2026-11-07, reading the same frames at 178% of a core against 147%.
+fn run_at_full_speed() {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+        ProcessPowerThrottling, SetProcessInformation,
+    };
+    // Controlled (the mask), and off (the state).
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    // SAFETY: the state outlives the call, which reads its size in bytes of it. A refusal
+    // only leaves the reading slower.
+    unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            (&raw const state).cast(),
+            size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        );
+    }
+}
+
+/// The frames of the game's window, several a second while it is open; the window is looked
 /// for again whenever it is gone. What happens to the window is told through `tell`.
-pub fn frames(tell: impl Fn(&str) + Send + 'static) -> Receiver<Shot> {
+pub fn frames(tell: impl Fn(Seen) + Send + 'static) -> Receiver<Shot> {
     let (sender, receiver) = sync_channel(1);
     thread::spawn(move || {
+        run_at_full_speed();
         let mut session: Option<(Window, CaptureControl<Capture, CaptureError>)> = None;
         let mut failed = false;
         loop {
@@ -251,7 +290,7 @@ pub fn frames(tell: impl Fn(&str) + Send + 'static) -> Receiver<Shot> {
                 if let Some((_, control)) = session.take() {
                     let _ = control.stop();
                 }
-                tell("ゲームのウィンドウが閉じました。開くのを待ちます。");
+                tell(Seen::Gone);
             }
             if session.is_none()
                 && let Some(window) = game_window()
@@ -260,12 +299,12 @@ pub fn frames(tell: impl Fn(&str) + Send + 'static) -> Receiver<Shot> {
                     Ok(control) => {
                         session = Some((window, control));
                         failed = false;
-                        tell("ゲームのウィンドウを見ています。");
+                        tell(Seen::Found);
                     }
                     // Told once, tried again every look.
                     Err(message) if !failed => {
                         failed = true;
-                        tell(&format!("ゲームのウィンドウを取り込めません: {message}"));
+                        tell(Seen::Failed(message));
                     }
                     Err(_) => {}
                 }
