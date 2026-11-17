@@ -10,9 +10,9 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, params_from_iter};
+use rusqlite::{Connection, params_from_iter, types::Value};
 
-use crate::history::{Battle, Plate};
+use crate::history::{Battle, Party, Plate};
 
 /// The students' columns, the attacker's team then the defender's.
 const SLOTS: [&str; 12] = [
@@ -25,8 +25,9 @@ pub struct Kept {
     pub id: i64,
     /// The local time Rio first saw the record, "2026-11-17 03:10:00": not the battle's.
     pub seen_at: String,
-    pub attacker: Player,
-    pub defender: Player,
+    /// `None` for an anonymous player (see `history::Party`).
+    pub attacker: Option<Player>,
+    pub defender: Option<Player>,
     pub attacker_won: bool,
     pub attack: [i64; 6],
     pub defense: [i64; 6],
@@ -58,8 +59,8 @@ impl Store {
             CREATE TABLE IF NOT EXISTS battles (
                 id INTEGER PRIMARY KEY,
                 seen_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
-                attacker INTEGER NOT NULL REFERENCES players (id),
-                defender INTEGER NOT NULL REFERENCES players (id),
+                attacker INTEGER REFERENCES players (id),
+                defender INTEGER REFERENCES players (id),
                 attacker_won INTEGER NOT NULL,
                 {slots}
                 fingerprint TEXT NOT NULL UNIQUE
@@ -80,27 +81,30 @@ impl Store {
         if kept {
             return Ok(false);
         }
-        let mut values = vec![
-            self.player(&battle.attacker.plate)?,
-            self.player(&battle.defender.plate)?,
-            i64::from(battle.attacker_won),
+        let mut values: Vec<Value> = vec![
+            self.player(&battle.attacker)?.into(),
+            self.player(&battle.defender)?.into(),
+            battle.attacker_won.into(),
         ];
         let fighters = battle.attacker.team.iter().chain(&battle.defender.team);
-        values.extend(fighters.map(|fighter| fighter.student));
+        values.extend(fighters.map(|fighter| Value::from(fighter.student)));
+        values.push(fingerprint.into());
         let marks = vec!["?"; values.len()].join(", ");
         let sql = format!(
             "INSERT INTO battles (attacker, defender, attacker_won, {}, fingerprint)
-             VALUES ({marks}, ?)",
+             VALUES ({marks})",
             SLOTS.join(", ")
         );
-        let values = values.into_iter().map(rusqlite::types::Value::from);
-        self.0
-            .execute(&sql, params_from_iter(values.chain([fingerprint.into()])))?;
+        self.0.execute(&sql, params_from_iter(values))?;
         Ok(true)
     }
 
-    /// The player a plate names: one kept whose plate draws the same name, or a new one.
-    fn player(&self, plate: &Plate) -> rusqlite::Result<i64> {
+    /// The player of a party: one kept whose plate draws the same name, or a new one; none
+    /// for an anonymous party.
+    fn player(&self, party: &Party) -> rusqlite::Result<Option<i64>> {
+        let Some(plate) = &party.plate else {
+            return Ok(None);
+        };
         let mut players = self
             .0
             .prepare("SELECT id, plate FROM players ORDER BY id")?;
@@ -113,7 +117,7 @@ impl Store {
         }
         self.0
             .execute("INSERT INTO players (plate) VALUES (?1)", [plate.png()])?;
-        Ok(self.0.last_insert_rowid())
+        Ok(Some(self.0.last_insert_rowid()))
     }
 
     /// The battles kept, the latest first.
@@ -122,10 +126,20 @@ impl Store {
         let mut battles = self.0.prepare(&format!(
             "SELECT b.id, b.seen_at, b.attacker, a.name, b.defender, d.name, b.attacker_won{slots}
              FROM battles b
-             JOIN players a ON a.id = b.attacker
-             JOIN players d ON d.id = b.defender
+             LEFT JOIN players a ON a.id = b.attacker
+             LEFT JOIN players d ON d.id = b.defender
              ORDER BY b.id DESC"
         ))?;
+        let player = |row: &rusqlite::Row, at: usize| -> rusqlite::Result<Option<Player>> {
+            let id: Option<i64> = row.get(at)?;
+            id.map(|id| {
+                Ok(Player {
+                    id,
+                    name: row.get(at + 1)?,
+                })
+            })
+            .transpose()
+        };
         let team = |row: &rusqlite::Row, from: usize| -> rusqlite::Result<[i64; 6]> {
             let mut team = [0; 6];
             for (slot, student) in team.iter_mut().enumerate() {
@@ -138,14 +152,8 @@ impl Store {
                 Ok(Kept {
                     id: row.get(0)?,
                     seen_at: row.get(1)?,
-                    attacker: Player {
-                        id: row.get(2)?,
-                        name: row.get(3)?,
-                    },
-                    defender: Player {
-                        id: row.get(4)?,
-                        name: row.get(5)?,
-                    },
+                    attacker: player(row, 2)?,
+                    defender: player(row, 4)?,
                     attacker_won: row.get(6)?,
                     attack: team(row, 7)?,
                     defense: team(row, 13)?,
@@ -178,7 +186,7 @@ mod tests {
 
     use image::{GrayImage, Luma};
 
-    use super::Store;
+    use super::{Player, Store};
     use crate::history::{Battle, Fighter, Party, Plate};
 
     /// A name of `strokes` upright strokes: two names differ in their strokes.
@@ -200,9 +208,13 @@ mod tests {
             damage: damage + n as u32,
         };
         Party {
-            plate: plate(strokes),
+            plate: Some(plate(strokes)),
             team: [0, 1, 2, 3, 4, 5].map(fighter),
         }
+    }
+
+    fn named(player: &Option<Player>) -> &Player {
+        player.as_ref().expect("a player with a name drawn")
     }
 
     fn battle(damage: u32) -> Battle {
@@ -247,6 +259,28 @@ mod tests {
     }
 
     #[test]
+    fn an_anonymous_player_is_nobody() {
+        let store = store();
+        let hidden = |damage| Battle {
+            defender: Party {
+                plate: None,
+                ..party(5, 20000, damage)
+            },
+            ..battle(damage)
+        };
+        store.save(&hidden(100)).unwrap();
+        store.save(&hidden(200)).unwrap();
+        let kept = store.battles().unwrap();
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|battle| battle.defender.is_none()));
+        assert!(kept.iter().all(|battle| battle.attacker.is_some()));
+        assert!(
+            !store.name(2, "だれか").unwrap(),
+            "no player is made for the anonymous"
+        );
+    }
+
+    #[test]
     fn a_battle_comes_back_as_it_was_read() {
         let store = store();
         let read = battle(100);
@@ -261,7 +295,11 @@ mod tests {
             kept.defense,
             read.defender.team.map(|fighter| fighter.student)
         );
-        assert_ne!(kept.attacker.id, kept.defender.id, "two players");
+        assert_ne!(
+            named(&kept.attacker).id,
+            named(&kept.defender).id,
+            "two players"
+        );
         assert!(!kept.seen_at.is_empty());
     }
 
@@ -291,22 +329,22 @@ mod tests {
         };
         store.save(&back).unwrap();
         let kept = store.battles().unwrap();
-        assert_eq!(kept[0].attacker.id, kept[1].defender.id);
-        assert_eq!(kept[0].defender.id, kept[1].attacker.id);
+        assert_eq!(named(&kept[0].attacker).id, named(&kept[1].defender).id);
+        assert_eq!(named(&kept[0].defender).id, named(&kept[1].attacker).id);
     }
 
     #[test]
     fn a_player_is_named() {
         let store = store();
         store.save(&battle(100)).unwrap();
-        let defender = store.battles().unwrap()[0].defender.id;
+        let defender = named(&store.battles().unwrap()[0].defender).id;
         assert!(store.name(defender, "ライバル").unwrap());
         assert!(
             !store.name(defender + 100, "だれか").unwrap(),
             "no such player"
         );
         let kept = &store.battles().unwrap()[0];
-        assert_eq!(kept.defender.name.as_deref(), Some("ライバル"));
-        assert_eq!(kept.attacker.name, None);
+        assert_eq!(named(&kept.defender).name.as_deref(), Some("ライバル"));
+        assert_eq!(named(&kept.attacker).name, None);
     }
 }

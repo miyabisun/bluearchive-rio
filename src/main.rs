@@ -37,9 +37,13 @@ fn database() -> Result<PathBuf, Box<dyn Error>> {
 /// A battle as the list shows it: the result, then each side's team in the players' terms
 /// (A1 to A4 and D1 to D4 the strikers from the left, SP the specials).
 fn describe(battle: &Kept, names: &HashMap<i64, String>) -> String {
-    let player = |player: &Player| match &player.name {
-        Some(name) => format!("{name}(#{})", player.id),
-        None => format!("プレイヤー#{}", player.id),
+    let player = |player: &Option<Player>| match player {
+        None => "匿名".to_owned(),
+        Some(Player {
+            id,
+            name: Some(name),
+        }) => format!("{name}(#{id})"),
+        Some(Player { id, name: None }) => format!("プレイヤー#{id}"),
     };
     let team = |team: &[i64; 6], side: char| {
         let student = |slot: usize| {
@@ -183,11 +187,11 @@ mod tests {
         let battle = Kept {
             id: 3,
             seen_at: "2026-11-17 03:10:00".to_owned(),
-            attacker: Player {
+            attacker: Some(Player {
                 id: 1,
                 name: Some("シャーレの先生".to_owned()),
-            },
-            defender: Player { id: 2, name: None },
+            }),
+            defender: Some(Player { id: 2, name: None }),
             attacker_won: true,
             attack: [1, 2, 3, 4, 5, 6],
             defense: [7, 2, 8, 9, 5, 99],
@@ -211,6 +215,14 @@ mod tests {
             "#3 2026-11-17 03:10:00 攻撃側の勝ち
   攻撃 シャーレの先生(#1): A1 ホシノ / A2 マリナ / A3 ヒビキ（応援団） / A4 ハスミ（水着） | SP イロハ / SP ミチル（ドレス）
   防衛 プレイヤー#2: D1 アツコ / D2 マリナ / D3 トキ / D4 イオリ | SP イロハ / SP 生徒#99"
+        );
+        let hidden = Kept {
+            defender: None,
+            ..battle
+        };
+        assert!(
+            describe(&hidden, &names).contains("\n  防衛 匿名: D1 アツコ"),
+            "an anonymous player has no number"
         );
     }
 }

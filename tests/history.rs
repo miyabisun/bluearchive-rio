@@ -2,7 +2,7 @@
 //! record is not read at all. The fixture is a 2370×1333 window's record, blacked out
 //! around the parts read; other window sizes are drawn from it.
 
-use bluearchive_rio::history::{Battle, Fighter, Reader};
+use bluearchive_rio::history::{Battle, Fighter, Party, Reader};
 use image::{Rgb, RgbImage, imageops};
 
 fn fixture() -> RgbImage {
@@ -79,16 +79,17 @@ fn a_player_is_known_by_the_name_drawn() {
     let reader = Reader::new();
     let native = reader.read(&fixture()).expect("the record reads");
     let smaller = reader.read(&drawn_at(1920)).expect("the record reads");
+    let plate = |party: &Party| party.plate.clone().expect("a name is drawn");
     assert!(
-        native.attacker.plate.same(&smaller.attacker.plate),
+        plate(&native.attacker).same(&plate(&smaller.attacker)),
         "the attacker at another window size"
     );
     assert!(
-        native.defender.plate.same(&smaller.defender.plate),
+        plate(&native.defender).same(&plate(&smaller.defender)),
         "the defender at another window size"
     );
     assert!(
-        !native.attacker.plate.same(&native.defender.plate),
+        !plate(&native.attacker).same(&plate(&native.defender)),
         "the attacker is not the defender"
     );
 }

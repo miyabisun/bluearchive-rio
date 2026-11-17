@@ -37,7 +37,9 @@ pub struct Plate(pub GrayImage);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Party {
-    pub plate: Plate,
+    /// The name drawn, or `None` for an anonymous player: one the game shows behind a "?"
+    /// icon. Two such players are not known to be one.
+    pub plate: Option<Plate>,
     pub team: Team,
 }
 
@@ -607,7 +609,7 @@ impl Reader {
             attacks: attack > defense,
             won: won(&sheet.crop(RESULT, shift(right))?)?,
             party: Party {
-                plate: plate(&sheet.crop(NAME, shift(right))?, sheet.scale)?,
+                plate: Some(plate(&sheet.crop(NAME, shift(right))?, sheet.scale)?),
                 team: in_order(team),
             },
         })
