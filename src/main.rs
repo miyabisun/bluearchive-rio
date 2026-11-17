@@ -346,6 +346,7 @@ mod tests {
             attacker_won: true,
             attack: [1, 2, 3, 4, 5, 6],
             defense: [7, 2, 8, 9, 5, 99],
+            fought: None,
         };
         let names = names();
         assert_eq!(

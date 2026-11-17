@@ -1,6 +1,8 @@
 //! Watches Blue Archive's tactical challenge (戦術対抗戦, the 6 on 6 PvP) and keeps what it
 //! shows: the battle records (`history`) in a database (`store`), told with the students of
-//! the SchaleDB snapshot, and the students held as Aoi wrote them (`aoi`). Before a battle
+//! the SchaleDB snapshot, and the students held as Aoi wrote them (`aoi`). The list the
+//! records are opened from (`list`) tells roughly when each battle was: its rows are kept
+//! too (`listing`), and a record is the battle of the row it was opened from. Before a battle
 //! it reads what the opponent's dialog shows of the defense (`opponent`), to look up what
 //! stood behind it in the records; in the formation dialog (`formation`) it marks over the
 //! game (`guide`, `overlay`) the students of the attack that won most against that defense.
@@ -14,6 +16,8 @@ pub mod capture;
 pub mod formation;
 pub mod guide;
 pub mod history;
+pub mod list;
+pub mod listing;
 pub mod opponent;
 pub mod overlay;
 pub mod settings;

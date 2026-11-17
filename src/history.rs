@@ -53,6 +53,9 @@ pub struct Battle {
     pub attacker: Party,
     pub defender: Party,
     pub attacker_won: bool,
+    /// Whether the user attacked: a record shows the user's own side on the left, attack
+    /// or defense.
+    pub user_attacked: bool,
 }
 
 impl Battle {
@@ -69,6 +72,7 @@ impl Battle {
                 }
         };
         self.attacker_won == other.attacker_won
+            && self.user_attacked == other.user_attacked
             && same(&self.attacker, &other.attacker)
             && same(&self.defender, &other.defender)
     }
@@ -109,8 +113,8 @@ const LABEL_HALF: f32 = 69.0;
 
 /// The sizes the parts are compared at.
 pub(crate) const TITLE_SIZE: (u32, u32) = (46, 14);
-const ROLE_SIZE: (u32, u32) = (16, 16);
-const ICON_SIZE: (u32, u32) = (16, 16);
+pub(crate) const ROLE_SIZE: (u32, u32) = (16, 16);
+pub(crate) const ICON_SIZE: (u32, u32) = (16, 16);
 const DIGIT_SIZE: (u32, u32) = (10, 14);
 const FACE_SIZE: u32 = 24;
 const PLATE_HEIGHT: u32 = 32;
@@ -141,6 +145,15 @@ pub(crate) fn spot((width, height): (u32, u32), scale: f32, (x, y): (f32, f32)) 
     (
         width as f32 / 2.0 + (x - MEASURED.0 / 2.0) * scale,
         height as f32 / 2.0 + (y - MEASURED.1 / 2.0) * scale,
+    )
+}
+
+/// The point of the measured screen that lies at a point of a screen of `size` drawn at
+/// `scale`: `spot` the other way.
+pub(crate) fn measured((width, height): (u32, u32), scale: f32, (x, y): (f32, f32)) -> (f32, f32) {
+    (
+        (x - width as f32 / 2.0) / scale + MEASURED.0 / 2.0,
+        (y - height as f32 / 2.0) / scale + MEASURED.1 / 2.0,
     )
 }
 
@@ -200,7 +213,7 @@ pub(crate) fn ink(pixel: &Rgb<u8>) -> u8 {
     ((190 - range(pixel).0) * 2).clamp(0, 255) as u8
 }
 /// A column of a name's line holds a letter from this much ink.
-const INKED: u8 = 128;
+pub(crate) const INKED: u8 = 128;
 
 /// The yellow of "Win".
 fn yellow(pixel: &Rgb<u8>) -> bool {
@@ -210,7 +223,7 @@ fn yellow(pixel: &Rgb<u8>) -> bool {
 
 /// How blue a pixel is: the sword and the shield, on the attacker's white and the
 /// defender's pink alike.
-fn blue(pixel: &Rgb<u8>) -> u8 {
+pub(crate) fn blue(pixel: &Rgb<u8>) -> u8 {
     (i32::from(pixel.0[2]) - i32::from(pixel.0[0])).clamp(0, 255) as u8
 }
 
@@ -247,7 +260,7 @@ pub(crate) fn likeness(a: &GrayImage, b: &GrayImage) -> f32 {
 }
 
 /// How far two pictures of one size are apart: the mean difference of their pixels.
-fn distance(a: &GrayImage, b: &GrayImage) -> f32 {
+pub(crate) fn distance(a: &GrayImage, b: &GrayImage) -> f32 {
     let sum: u32 = a
         .iter()
         .zip(b.iter())
@@ -257,7 +270,7 @@ fn distance(a: &GrayImage, b: &GrayImage) -> f32 {
 }
 
 /// The nearest of `distances` if it is near enough and leads the next clearly: its index.
-fn clear(distances: impl Iterator<Item = f32>, near: f32) -> Option<usize> {
+pub(crate) fn clear(distances: impl Iterator<Item = f32>, near: f32) -> Option<usize> {
     let (mut best, mut next) = ((f32::MAX, 0), f32::MAX);
     for (at, distance) in distances.enumerate() {
         if distance < best.0 {
@@ -486,7 +499,7 @@ const LOSE_YELLOW: f32 = 0.005;
 const LOSE_DARK: f32 = 0.05;
 
 /// Whether the side won, from the word in `area`.
-fn won(area: &RgbImage) -> Option<bool> {
+pub(crate) fn won(area: &RgbImage) -> Option<bool> {
     let share = |is: fn(&Rgb<u8>) -> bool| {
         area.pixels().filter(|pixel| is(pixel)).count() as f32
             / (area.width() * area.height()) as f32
@@ -569,7 +582,7 @@ pub(crate) const LIKE: f32 = 0.9;
 /// A player's picture this little like the "?" is another picture; one between is not read.
 /// Over two screens drawn at the same 291 widths, the "?" was 0.987 like its reference at
 /// least, and two players' own pictures 0.034 at most.
-const UNLIKE: f32 = 0.5;
+pub(crate) const UNLIKE: f32 = 0.5;
 
 /// Where a face is looked for about its place: the sizes of the square against the usual
 /// one, and the pixels off it across and down.
@@ -605,14 +618,17 @@ struct Side {
 
 /// Reads battle records with the references built into the program.
 pub struct Reader {
-    title: GrayImage,
+    pub(crate) title: GrayImage,
     /// The attacker's sword and the defender's shield.
-    roles: [GrayImage; 2],
+    pub(crate) roles: [GrayImage; 2],
     /// The "?" an anonymous player's picture shows.
-    anonymous: GrayImage,
+    pub(crate) anonymous: GrayImage,
     /// The digits 0 to 9.
     digits: Vec<GrayImage>,
     faces: Vec<Face>,
+    /// The digits 0 to 9 of the time a row of the list tells, and its kanji (see `list`).
+    pub(crate) ago_digits: Vec<GrayImage>,
+    pub(crate) ago_kanji: Vec<GrayImage>,
     /// "対戦相手", the title of the dialog `opponent` reads.
     pub(crate) front: GrayImage,
     /// "編成", the title of the dialog `formation` reads.
@@ -633,7 +649,22 @@ impl Reader {
                 .to_luma8()
         };
         let digits = reference(include_bytes!("../data/digits.png"));
+        // A strip of pictures side by side, each `wide`.
+        let strip = |bytes: &[u8], wide: u32| -> Vec<GrayImage> {
+            let strip = reference(bytes);
+            (0..strip.width() / wide)
+                .map(|at| imageops::crop_imm(&strip, at * wide, 0, wide, strip.height()).to_image())
+                .collect()
+        };
         Self {
+            ago_digits: strip(
+                include_bytes!("../data/ago-digits.png"),
+                crate::list::DIGIT_SIZE.0,
+            ),
+            ago_kanji: strip(
+                include_bytes!("../data/ago-kanji.png"),
+                crate::list::KANJI_SIZE.0,
+            ),
             title: reference(include_bytes!("../data/title.png")),
             roles: [
                 reference(include_bytes!("../data/attack.png")),
@@ -668,12 +699,14 @@ impl Reader {
         if left.attacks == right.attacks || left.won == right.won {
             return None;
         }
+        let user_attacked = left.attacks;
         let (attacker, defender) = if left.attacks {
             (left, right)
         } else {
             (right, left)
         };
         Some(Battle {
+            user_attacked,
             attacker_won: attacker.won,
             attacker: attacker.party,
             defender: defender.party,
@@ -849,7 +882,7 @@ mod tests {
 
     use image::{GrayImage, Luma};
 
-    use super::{Battle, Fighter, Party, Plate, STILL, Steady, in_order};
+    use super::{Battle, Fighter, Party, Plate, STILL, Steady, in_order, measured, spot};
 
     /// A name of one stroke, `shade` bright, `down` from the top.
     fn name(shade: u8, down: u32) -> Option<Plate> {
@@ -872,7 +905,24 @@ mod tests {
             },
             defender: Party { plate: None, team },
             attacker_won: true,
+            user_attacked: true,
         }
+    }
+
+    #[test]
+    fn a_point_of_a_frame_is_found_on_the_measured_screen() {
+        // A Full HD frame draws the game 0.81 as large about its middle.
+        let (size, scale) = ((1920, 1080), 1920.0 / 2370.0);
+        let (x, y) = measured(size, scale, (960.0, 540.0));
+        assert!(
+            (x - 1185.0).abs() < 0.01 && (y - 666.5).abs() < 0.01,
+            "the middle"
+        );
+        let (x, y) = measured(size, scale, spot(size, scale, (1750.0, 480.0)));
+        assert!(
+            (x - 1750.0).abs() < 0.01 && (y - 480.0).abs() < 0.01,
+            "and back"
+        );
     }
 
     #[test]

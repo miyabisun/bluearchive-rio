@@ -1,7 +1,9 @@
 //! What Rio marks over the game, on the measured screen (see `history`): the strikers it
 //! expects where the game shows "?", and in the formation dialog the cards to pick and to
 //! take out for the attack the records counsel. Positions in the team are set after the
-//! dialog, by dragging: in it, the six students are only chosen.
+//! dialog, by dragging: in it, the six students are only chosen. Over a battle record it
+//! says whether the record is kept, and over the list of records which rows' records are:
+//! the user's eyes stay on the game.
 
 use std::{
     collections::HashMap,
@@ -11,6 +13,7 @@ use std::{
 use crate::{
     formation::{CARD_AROUND, FRONT_SIDE, Formation, HIDDEN, LIST, TABS, TEAM, TEAM_SIDE, Tab},
     history::Area,
+    list::BUTTON,
     opponent::{CARD, CARD_SIDE, CARD_STEP},
 };
 
@@ -41,6 +44,111 @@ pub enum Mark {
         way: Way,
         middle: (f32, f32),
     },
+    /// Words on a ground of their own, `tall` high: their left end and their middle at a
+    /// point.
+    Say {
+        words: Words,
+        at: (f32, f32),
+        tall: f32,
+    },
+}
+
+/// What Rio says over the game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Words {
+    /// A record is being read, and not kept yet.
+    Reading,
+    /// The record was kept just now.
+    Kept,
+    /// The record was kept before.
+    Known,
+    /// A row's record was read.
+    Read,
+    /// A row's record was not read yet.
+    Unread,
+    /// The list was up before Rio looked: its rows are read once it is opened anew.
+    Reopen,
+}
+
+impl Words {
+    pub const ALL: [Self; 6] = [
+        Self::Reading,
+        Self::Kept,
+        Self::Known,
+        Self::Read,
+        Self::Unread,
+        Self::Reopen,
+    ];
+
+    /// The words as the user reads them.
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Reading => "読み取り中",
+            Self::Kept => "登録しました",
+            Self::Known => "既に登録済み",
+            Self::Read => "読み取り済み",
+            Self::Unread => "未読",
+            Self::Reopen => "開き直すと読み取ります",
+        }
+    }
+
+    /// The name of the words' picture in `data/words`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Reading => "reading",
+            Self::Kept => "kept",
+            Self::Known => "known",
+            Self::Read => "read",
+            Self::Unread => "unread",
+            Self::Reopen => "reopen",
+        }
+    }
+}
+
+/// Where a record's words begin, right of its title, and how tall they are; how tall a
+/// row's are, and where they begin from the corner of the row's button.
+const RECORD_SAY: (f32, f32) = (1322.0, 226.0);
+const RECORD_TALL: f32 = 56.0;
+const ROW_SAY: (f32, f32) = (10.0, 2.0);
+const ROW_SAY_TALL: f32 = 40.0;
+/// Where the list's own words begin, right of its title, and how tall they are.
+const LIST_SAY: (f32, f32) = (1322.0, 323.0);
+const LIST_SAY_TALL: f32 = 48.0;
+
+/// The words over a battle record.
+pub fn for_record(words: Words) -> Vec<Mark> {
+    vec![Mark::Say {
+        words,
+        at: RECORD_SAY,
+        tall: RECORD_TALL,
+    }]
+}
+
+/// The words over the rows of the list of records: for each row its top, and whether its
+/// record was read. A row to open has its button framed. A list that is not `timed` (it
+/// was up before Rio looked, so its rows' times do not count) says beside its title that
+/// opening it anew has it read.
+pub fn for_list(rows: &[(f32, bool)], timed: bool) -> Vec<Mark> {
+    let (left, up, right, down) = BUTTON;
+    let mut marks = Vec::new();
+    if !timed {
+        marks.push(Mark::Say {
+            words: Words::Reopen,
+            at: LIST_SAY,
+            tall: LIST_SAY_TALL,
+        });
+    }
+    for &(top, read) in rows {
+        if !read {
+            marks.push(Mark::Pick((left, top + up, right, top + down)));
+        }
+        marks.push(Mark::Say {
+            words: if read { Words::Read } else { Words::Unread },
+            at: (left + ROW_SAY.0, top + ROW_SAY.1 + ROW_SAY_TALL / 2.0),
+            tall: ROW_SAY_TALL,
+        });
+    }
+    marks
 }
 
 /// What the list orders a student by, after the students of the team as it stood when the
@@ -195,7 +303,9 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{Mark, Rank, Visit, Way, for_formation, for_opponent, way};
+    use super::{
+        Mark, Rank, Visit, Way, Words, for_formation, for_list, for_opponent, for_record, way,
+    };
     use crate::{
         formation::{Card, Formation, Tab},
         opponent::Front,
@@ -379,5 +489,72 @@ mod tests {
         assert_eq!(visit.enter(&team(None), soon), [1, 2, 3], "one taken out");
         let later = soon + Duration::from_secs(60);
         assert_eq!(visit.enter(&team(Some(9)), later), [1, 2, 9], "opened anew");
+    }
+
+    #[test]
+    fn a_record_says_where_it_stands_beside_its_title() {
+        let [Mark::Say { words, at, tall }] = for_record(Words::Kept)[..] else {
+            panic!("one mark of words");
+        };
+        assert_eq!(words, Words::Kept);
+        assert!(at.0 > 1292.0, "right of the title, which ends at 1292");
+        assert!((200.0..=250.0).contains(&at.1), "on the title's line");
+        assert!(tall <= 60.0, "within the record's head");
+    }
+
+    #[test]
+    fn the_rows_say_whether_their_records_are_read() {
+        // Two rows in sight: the upper read, the lower not.
+        let marks = for_list(&[(398.0, true), (573.0, false)], true);
+        let said: Vec<(Words, f32)> = marks
+            .iter()
+            .filter_map(|mark| match mark {
+                Mark::Say { words, at, .. } => Some((*words, at.1)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said.len(), 2);
+        assert_eq!((said[0].0, said[1].0), (Words::Read, Words::Unread));
+        assert!((398.0..440.0).contains(&said[0].1), "at the row's top");
+        assert!((573.0..615.0).contains(&said[1].1));
+        // Only the row to open has its button framed.
+        let framed: Vec<_> = marks
+            .iter()
+            .filter_map(|mark| match mark {
+                Mark::Pick(area) => Some(*area),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(framed.len(), 1);
+        assert!(
+            framed[0].1 >= 573.0 && framed[0].3 <= 573.0 + 165.0,
+            "in the lower row"
+        );
+        assert!(for_list(&[], true).is_empty());
+    }
+
+    #[test]
+    fn a_list_up_before_rio_looked_says_to_open_it_anew() {
+        // A row kept before is still told; beside the title the list says what to do.
+        let marks = for_list(&[(398.0, true)], false);
+        let said: Vec<(Words, (f32, f32))> = marks
+            .iter()
+            .filter_map(|mark| match mark {
+                Mark::Say { words, at, .. } => Some((*words, *at)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said.len(), 2);
+        assert_eq!(said[0].0, Words::Reopen);
+        assert!(
+            said[0].1.0 > 1291.0,
+            "right of the title, which ends at 1291"
+        );
+        assert!(
+            (298.0..=348.0).contains(&said[0].1.1),
+            "on the title's line"
+        );
+        assert_eq!(said[1].0, Words::Read);
+        assert_eq!(for_list(&[], false).len(), 1, "with no row told as well");
     }
 }

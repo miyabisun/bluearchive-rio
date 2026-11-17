@@ -8,7 +8,7 @@ use image::{
 };
 
 use crate::{
-    guide::{Mark, SEEK_SIDE, Way},
+    guide::{Mark, SEEK_SIDE, Way, Words},
     history::{Area, scale, spot},
 };
 
@@ -21,12 +21,28 @@ const GUESS: Rgba<u8> = Rgba([255, 205, 0, 255]);
 const VEIL: Rgba<u8> = Rgba([0, 0, 0, 140]);
 const GROUND: Rgba<u8> = Rgba([24, 28, 44, 235]);
 const ARROW: Rgba<u8> = Rgba([255, 255, 255, 255]);
+/// The grounds of the words for a record kept (or a row's record read), and for one kept
+/// before: the words tell them apart too.
+const DONE: Rgba<u8> = Rgba([18, 132, 72, 245]);
+const BEFORE: Rgba<u8> = Rgba([36, 92, 168, 245]);
+/// The room left and right of words on their ground, for a ground one high.
+const SAY_ROOM: f32 = 0.3;
 /// How thick a frame is, and how an arrow is drawn beside a sought student's icon: its
 /// gap to the icon, its height and its width. On the measured screen.
 const FRAME: f32 = 8.0;
 const ARROW_GAP: f32 = 6.0;
 const ARROW_TALL: f32 = 30.0;
 const ARROW_WIDE: f32 = 56.0;
+
+/// The words' pictures (`data/words`, drawn by `make_refs`), in the order of `Words::ALL`.
+const WORDS: [&[u8]; 6] = [
+    include_bytes!("../data/words/reading.png"),
+    include_bytes!("../data/words/kept.png"),
+    include_bytes!("../data/words/known.png"),
+    include_bytes!("../data/words/read.png"),
+    include_bytes!("../data/words/unread.png"),
+    include_bytes!("../data/words/reopen.png"),
+];
 
 struct Canvas {
     picture: RgbaImage,
@@ -84,6 +100,45 @@ impl Canvas {
             imageops::overlay(&mut self.picture, &icon, i64::from(x0), i64::from(y0));
         }
         square
+    }
+
+    /// Words on their ground, `tall` high: the ground's left end and middle at `at`.
+    fn say(&mut self, words: Words, at: (f32, f32), tall: f32) {
+        let (letters, ground) = match words {
+            Words::Reading => (WORDS[0], GROUND),
+            Words::Kept => (WORDS[1], DONE),
+            Words::Known => (WORDS[2], BEFORE),
+            Words::Read => (WORDS[3], DONE),
+            Words::Unread => (WORDS[4], PICK),
+            Words::Reopen => (WORDS[5], GROUND),
+        };
+        let Ok(letters) = image::load_from_memory(letters) else {
+            return;
+        };
+        let letters = letters.to_luma8();
+        // The picture's height is the ground's.
+        let drawn = tall * self.scale / letters.height() as f32;
+        let (wide, high) = (
+            (letters.width() as f32 * drawn).round().max(1.0) as u32,
+            (letters.height() as f32 * drawn).round().max(1.0) as u32,
+        );
+        let letters = imageops::resize(&letters, wide, high, FilterType::Triangle);
+        let room = tall * SAY_ROOM;
+        let top = at.1 - tall / 2.0;
+        let right = at.0 + room * 2.0 + wide as f32 / self.scale;
+        self.fill((at.0, top, right, top + tall), ground);
+        let (left, top, _, _) = self.pixels((at.0 + room, top, right, top + tall));
+        for (x, y, cover) in letters.enumerate_pixels() {
+            let (x, y) = (left + x, top + y);
+            if x < self.picture.width() && y < self.picture.height() {
+                let cover = u32::from(cover.0[0]);
+                let pixel = self.picture.get_pixel_mut(x, y);
+                // White over the ground, as much as the letter covers.
+                pixel.0 = pixel
+                    .0
+                    .map(|colour| ((u32::from(colour) * (255 - cover) + 255 * cover) / 255) as u8);
+            }
+        }
     }
 
     /// An arrow's head with its tip at `tip`, pointing up or down.
@@ -155,6 +210,7 @@ pub fn draw(marks: &[Mark], width: u32, height: u32) -> RgbaImage {
                     canvas.arrow((middle.0, middle.1 + reach), false);
                 }
             }
+            Mark::Say { words, at, tall } => canvas.say(words, at, tall),
         }
     }
     canvas.picture
@@ -380,7 +436,7 @@ mod window {
 #[cfg(test)]
 mod tests {
     use super::{GUESS, PICK, draw};
-    use crate::guide::Mark;
+    use crate::guide::{Mark, Words};
 
     const CARD: Mark = Mark::Pick((1000.0, 400.0, 1200.0, 600.0));
 
@@ -428,5 +484,65 @@ mod tests {
             "the icon covers the \"?\""
         );
         assert_eq!(picture.get_pixel(365, 700).0[3], 0, "nothing above");
+    }
+
+    /// Words beside a record's title, and at a row's button.
+    fn say(words: Words) -> Mark {
+        Mark::Say {
+            words,
+            at: (1322.0, 226.0),
+            tall: 56.0,
+        }
+    }
+
+    #[test]
+    fn words_stand_on_a_ground_of_their_own() {
+        let kept = draw(&[say(Words::Kept)], 2370, 1333);
+        let ground = *kept.get_pixel(1325, 226);
+        assert!(
+            ground.0[3] >= 200,
+            "the ground begins at the words' left end"
+        );
+        assert_eq!(kept.get_pixel(1310, 226).0[3], 0, "nothing left of it");
+        assert_eq!(kept.get_pixel(1340, 190).0[3], 0, "nothing above it");
+        assert_eq!(kept.get_pixel(1340, 262).0[3], 0, "nothing under it");
+        let white = |picture: &image::RgbaImage| {
+            (1322..1700).any(|x| (198..254).any(|y| picture.get_pixel(x, y).0 == [255; 4]))
+        };
+        assert!(white(&kept), "the letters are white on the ground");
+        // The ground tells the words apart as the letters do.
+        for other in [Words::Known, Words::Reading] {
+            let picture = draw(&[say(other)], 2370, 1333);
+            assert_ne!(*picture.get_pixel(1325, 226), ground, "{other:?}");
+            assert!(white(&picture), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn the_ground_is_as_wide_as_the_words() {
+        let at = |words| Mark::Say {
+            words,
+            at: (1635.0, 420.0),
+            tall: 40.0,
+        };
+        let (read, unread) = (
+            draw(&[at(Words::Read)], 2370, 1333),
+            draw(&[at(Words::Unread)], 2370, 1333),
+        );
+        assert!(read.get_pixel(1785, 420).0[3] > 0, "six letters reach here");
+        assert_eq!(unread.get_pixel(1785, 420).0[3], 0, "two do not");
+        assert!(unread.get_pixel(1640, 420).0[3] > 0);
+    }
+
+    #[test]
+    fn words_follow_the_windows_size() {
+        // On a Full HD screen the measured (1325, 226) lies at (1073.4, 183.1).
+        let picture = draw(&[say(Words::Kept)], 1920, 1080);
+        assert!(picture.get_pixel(1074, 183).0[3] >= 200);
+        assert_eq!(
+            picture.get_pixel(1325, 226).0[3],
+            0,
+            "not where 2370 wide draws it"
+        );
     }
 }

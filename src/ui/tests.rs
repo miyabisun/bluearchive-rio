@@ -14,7 +14,7 @@ use crate::{
     app::{Core, Places, Snapshot, UpdateCheck},
     opponent::Front,
     settings::{Settings, ThemeChoice},
-    store::{Counsel, Kept, Player, Seen, Tried},
+    store::{Counsel, Fought, Kept, Player, Seen, Tried},
     watch::{Opponent, Screen, Status},
 };
 
@@ -125,6 +125,7 @@ fn battle(id: i64, attacker: Option<&str>, attacker_won: bool) -> Kept {
         attacker_won,
         attack: [10005, 10037, 10059, 10006, 20016, 20008],
         defense: [13010, 10037, 10062, 10006, 20016, 20053],
+        fought: None,
     }
 }
 
@@ -202,7 +203,10 @@ fn the_history_lists_the_battles_with_the_winner_marked(cx: &mut TestAppContext)
             battle(1, Some("先生"), true),
         ];
     });
-    assert!(shows(vcx, "\u{a0}2"), "the tab counts the battles");
+    assert!(
+        !shows(vcx, "\u{a0}2"),
+        "the tab counts no battles: they only ever grow"
+    );
     click(vcx, "tab:履歴");
     assert!(shows(vcx, "先生"), "the name the user gave");
     assert!(shows(vcx, "匿名"), "an anonymous defender");
@@ -225,6 +229,31 @@ fn the_history_lists_the_battles_with_the_winner_marked(cx: &mut TestAppContext)
     );
     assert!(bounds(vcx, "won:2:attack").is_none());
     assert!(on_line(vcx, "won:1:attack", "side:1:attack"));
+}
+
+#[gpui::test]
+fn a_battle_shows_when_it_was_where_the_games_list_told(cx: &mut TestAppContext) {
+    let (_, core, vcx) = open(cx);
+    set(&core, vcx, |snapshot| {
+        let told = Kept {
+            fought: Some(Fought {
+                about: "2026-11-17 22:30:00".to_owned(),
+                within: 3600,
+            }),
+            ..battle(2, Some("先生"), false)
+        };
+        snapshot.battles = vec![told, battle(1, Some("先生"), true)];
+    });
+    click(vcx, "tab:履歴");
+    assert!(shows(vcx, "11-17 22時ごろ"), "the battle's own time");
+    assert!(
+        !shows(vcx, "登録 11-17 13:12"),
+        "and not when Rio kept it as well"
+    );
+    assert!(
+        shows(vcx, "登録 11-17 13:11"),
+        "a battle no row told of shows when it was kept"
+    );
 }
 
 #[gpui::test]

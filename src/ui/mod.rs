@@ -379,7 +379,6 @@ impl Rio {
     }
 
     fn header(&mut self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let battles = self.shown.battles.len();
         let tabs = div()
             .id("tabs")
             .role(gpui::Role::TabList)
@@ -390,17 +389,11 @@ impl Rio {
             .overflow_x_scroll()
             .children(Tab::ALL.into_iter().map(|tab| {
                 let selected = self.tab == tab && !self.settings_open;
-                let counted = tab == Tab::History && battles > 0;
-                let name = if counted {
-                    format!("{} {battles}", tab.name())
-                } else {
-                    tab.name().to_owned()
-                };
                 div()
                     .id(SharedString::from(format!("tab-{}", tab.id())))
                     .debug_selector(move || format!("tab:{}", tab.name()))
                     .role(gpui::Role::Tab)
-                    .aria_label(name)
+                    .aria_label(tab.name())
                     .aria_selected(selected)
                     .tab_stop(true)
                     .flex()
@@ -425,15 +418,6 @@ impl Rio {
                     .font_weight(FontWeight::SEMIBOLD)
                     .cursor_pointer()
                     .child(tab.name())
-                    .when(counted, |t| {
-                        t.child(
-                            div()
-                                .font_weight(FontWeight::NORMAL)
-                                .text_color(theme.muted)
-                                .font_features(theme::tabular())
-                                .child(text(format!("\u{a0}{battles}"))),
-                        )
-                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.tab = tab;
                         this.settings_open = false;
@@ -908,8 +892,8 @@ fn side_line(
         .child(div().flex().flex_none().gap(SP_1).children(faces))
 }
 
-/// A battle of the history: when it was kept, then the attacker's line over the defender's,
-/// the winner's marked.
+/// A battle of the history: when it was (or, where no row of the game's list told, when it
+/// was kept), then the attacker's line over the defender's, the winner's marked.
 fn battle_row(
     theme: &Theme,
     names: &HashMap<i64, String>,
@@ -935,7 +919,10 @@ fn battle_row(
                 .text_size(FS_CAPTION)
                 .text_color(theme.muted)
                 .font_features(theme::tabular())
-                .child(format!("登録 {}", view::kept_at(&battle.seen_at))),
+                .child(text(match &battle.fought {
+                    Some(fought) => view::fought_at(fought),
+                    None => format!("登録 {}", view::kept_at(&battle.seen_at)),
+                })),
         )
         .child(side_line(
             theme,

@@ -7,6 +7,9 @@
 //! numbers that no other battle repeats. It is kept as the battle's fingerprint and as
 //! nothing else, for it says little of who won (it leaves out healing and blows taken, and
 //! grows on summons and on enemies healed).
+//!
+//! The rows of the game's list of records are kept too (`listed`, see `listing`): a row
+//! tells roughly when its battle was, and a record opened from a row is that row's battle.
 
 use std::path::Path;
 
@@ -14,6 +17,8 @@ use rusqlite::{Connection, OptionalExtension, params_from_iter, types::Value};
 
 use crate::{
     history::{Battle, Party, Plate},
+    list::Row,
+    listing::{self, Fight, Listed, Match, Sighting, Told},
     opponent::Front,
 };
 
@@ -34,6 +39,23 @@ pub struct Kept {
     pub attacker_won: bool,
     pub attack: [i64; 6],
     pub defense: [i64; 6],
+    /// When the battle was, where a row of the game's list told.
+    pub fought: Option<Fought>,
+}
+
+/// When a battle was, as far as the game's list told it: the middle of the time its row
+/// allowed, as local time ("2026-11-18 00:10:00"), and how many seconds that time spans.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fought {
+    pub about: String,
+    pub within: i64,
+}
+
+/// A battle kept: its number, and whether it was kept just now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Saved {
+    pub id: i64,
+    pub new: bool,
 }
 
 /// A player, known by the name drawn (see `history::Plate`) and named by the user.
@@ -106,6 +128,16 @@ impl Store {
                 attacker_won INTEGER NOT NULL,
                 {slots}
                 fingerprint TEXT NOT NULL UNIQUE
+            );
+            CREATE TABLE IF NOT EXISTS listed (
+                id INTEGER PRIMARY KEY,
+                place REAL NOT NULL,
+                attacked INTEGER NOT NULL,
+                won INTEGER NOT NULL,
+                opponent INTEGER REFERENCES players (id),
+                earliest INTEGER NOT NULL,
+                latest INTEGER NOT NULL,
+                battle INTEGER UNIQUE REFERENCES battles (id)
             );"
         ))?;
         Ok(Self(connection))
@@ -113,19 +145,25 @@ impl Store {
 
     /// Keeps a battle; `false` for one kept before.
     pub fn save(&self, battle: &Battle) -> rusqlite::Result<bool> {
+        Ok(self.keep(battle)?.new)
+    }
+
+    /// Keeps a battle, or finds it kept: its number either way.
+    pub fn keep(&self, battle: &Battle) -> rusqlite::Result<Saved> {
         let fingerprint = fingerprint(battle);
         // Asked before the players are looked up, so a battle kept before makes no player.
-        let kept: bool = self.0.query_row(
-            "SELECT EXISTS (SELECT 1 FROM battles WHERE fingerprint = ?1)",
+        let kept = self.0.query_row(
+            "SELECT id FROM battles WHERE fingerprint = ?1",
             [&fingerprint],
             |row| row.get(0),
-        )?;
-        if kept {
-            return Ok(false);
+        );
+        if let Some(id) = kept.optional()? {
+            return Ok(Saved { id, new: false });
         }
+        let player = |party: &Party| self.opponent(party.plate.as_ref());
         let mut values: Vec<Value> = vec![
-            self.player(&battle.attacker)?.into(),
-            self.player(&battle.defender)?.into(),
+            player(&battle.attacker)?.into(),
+            player(&battle.defender)?.into(),
             battle.attacker_won.into(),
         ];
         let fighters = battle.attacker.team.iter().chain(&battle.defender.team);
@@ -138,13 +176,16 @@ impl Store {
             SLOTS.join(", ")
         );
         self.0.execute(&sql, params_from_iter(values))?;
-        Ok(true)
+        Ok(Saved {
+            id: self.0.last_insert_rowid(),
+            new: true,
+        })
     }
 
-    /// The player of a party: one kept whose plate draws the same name, or a new one; none
-    /// for an anonymous party.
-    fn player(&self, party: &Party) -> rusqlite::Result<Option<i64>> {
-        let Some(plate) = &party.plate else {
+    /// The player of a name the game draws: one kept whose plate draws the same name, or a
+    /// new one; none for no name (an anonymous player).
+    pub fn opponent(&self, name: Option<&Plate>) -> rusqlite::Result<Option<i64>> {
+        let Some(plate) = name else {
             return Ok(None);
         };
         if let Some(known) = self.known(plate)? {
@@ -153,6 +194,67 @@ impl Store {
         self.0
             .execute("INSERT INTO players (plate) VALUES (?1)", [plate.png()])?;
         Ok(Some(self.0.last_insert_rowid()))
+    }
+
+    /// The rows of the game's list kept, the newest first: the game lists far fewer than
+    /// are asked for here.
+    pub fn listed(&self) -> rusqlite::Result<Vec<Listed>> {
+        let mut rows = self.0.prepare(
+            "SELECT id, place, attacked, won, opponent, earliest, latest, battle FROM listed
+             ORDER BY place DESC LIMIT 500",
+        )?;
+        rows.query_map([], |row| {
+            Ok(Listed {
+                id: row.get(0)?,
+                place: row.get(1)?,
+                fight: Fight {
+                    attacked: row.get(2)?,
+                    won: row.get(3)?,
+                    opponent: row.get(4)?,
+                },
+                range: (row.get(5)?, row.get(6)?),
+                battle: row.get(7)?,
+            })
+        })?
+        .collect()
+    }
+
+    /// Keeps a row of the game's list at a place of the list (see `listing`): its number.
+    pub fn list(&self, row: &Sighting, place: f64) -> rusqlite::Result<i64> {
+        self.0.execute(
+            "INSERT INTO listed (place, attacked, won, opponent, earliest, latest)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                place,
+                row.fight.attacked,
+                row.fight.won,
+                row.fight.opponent,
+                row.range.0,
+                row.range.1
+            ],
+        )?;
+        Ok(self.0.last_insert_rowid())
+    }
+
+    /// Narrows the time of a row kept.
+    pub fn narrow(&self, row: i64, range: (i64, i64)) -> rusqlite::Result<()> {
+        self.0.execute(
+            "UPDATE listed SET earliest = ?2, latest = ?3 WHERE id = ?1",
+            rusqlite::params![row, range.0, range.1],
+        )?;
+        Ok(())
+    }
+
+    /// Takes a battle kept for the record of a row: the row's time is the battle's from
+    /// here on, and no other row's.
+    pub fn link(&self, row: i64, battle: i64) -> rusqlite::Result<()> {
+        self.0.execute(
+            "UPDATE listed SET battle = NULL WHERE battle = ?2 AND id <> ?1",
+            [row, battle],
+        )?;
+        self.0
+            .execute("UPDATE listed SET battle = ?2 WHERE id = ?1", [row, battle])?;
+        Ok(())
     }
 
     /// The player kept whose plate draws the same name.
@@ -252,10 +354,13 @@ impl Store {
         let slots: String = SLOTS.iter().map(|slot| format!(", b.{slot}")).collect();
         let mut battles = self.0.prepare(&format!(
             "SELECT b.id, b.seen_at, b.attacker, a.name, a.plate, b.defender, d.name, d.plate,
-                    b.attacker_won{slots}
+                    b.attacker_won{slots},
+                    datetime((l.earliest + l.latest) / 2, 'unixepoch', 'localtime'),
+                    l.latest - l.earliest
              FROM battles b
              LEFT JOIN players a ON a.id = b.attacker
              LEFT JOIN players d ON d.id = b.defender
+             LEFT JOIN listed l ON l.battle = b.id
              ORDER BY b.id DESC"
         ))?;
         let player = |row: &rusqlite::Row, at: usize| -> rusqlite::Result<Option<Player>> {
@@ -286,6 +391,10 @@ impl Store {
                     attacker_won: row.get(8)?,
                     attack: team(row, 9)?,
                     defense: team(row, 15)?,
+                    fought: match (row.get(21)?, row.get(22)?) {
+                        (Some(about), Some(within)) => Some(Fought { about, within }),
+                        _ => None,
+                    },
                 })
             })?
             .collect()
@@ -310,6 +419,82 @@ impl Store {
                 })
             })?
             .collect()
+    }
+
+    /// Tells the rows a frame read of the game's list, a row for a row: `since` is when the
+    /// list came up (seconds since 1970, `None` if Rio did not see it come), `clock` the
+    /// time now. A name not met makes a player only where its row is kept: in a list that
+    /// was up before Rio looked, only the latest time a row allows is known, and a row
+    /// never kept stays untold.
+    pub fn see(
+        &self,
+        rows: &[Option<Row>],
+        since: Option<i64>,
+        clock: i64,
+    ) -> rusqlite::Result<Vec<Option<Told>>> {
+        let mut seen = Vec::new();
+        for row in rows {
+            // The opponent's number: none for a row that tells no row kept.
+            let opponent = match (row, since) {
+                (None, _) => None,
+                (Some(Row { opponent: None, .. }), _) => Some(None),
+                (Some(Row { opponent: name, .. }), Some(_)) => Some(self.opponent(name.as_ref())?),
+                (
+                    Some(Row {
+                        opponent: Some(name),
+                        ..
+                    }),
+                    None,
+                ) => self.known(name)?.map(Some),
+            };
+            seen.push(row.as_ref().zip(opponent).map(|(row, opponent)| Sighting {
+                fight: Fight {
+                    attacked: row.attacked,
+                    won: row.won,
+                    opponent,
+                },
+                range: row.ago.range(since.unwrap_or(0), clock),
+            }));
+        }
+        self.tell(&seen, since.is_some())
+    }
+
+    /// Tells the rows in sight of the game's list, from the top (`None` for a row that
+    /// did not read): for each the row kept that it is, its time narrowed by what it tells
+    /// now. A row not kept yet is kept if `new` (the list came up under Rio's eyes, so its
+    /// rows' times count); a row that may be either of two kept is not told.
+    pub fn tell(
+        &self,
+        seen: &[Option<Sighting>],
+        new: bool,
+    ) -> rusqlite::Result<Vec<Option<Told>>> {
+        let kept = self.listed()?;
+        let matches = listing::align(&kept, seen);
+        let places = listing::places(&kept, seen, &matches);
+        let mut told = Vec::new();
+        for (at, row) in seen.iter().enumerate() {
+            told.push(match (row, matches[at], places[at]) {
+                (Some(row), Match::Kept(known), _) => {
+                    let known = &kept[known];
+                    let range = listing::narrowed(known.range, row.range);
+                    if range != known.range {
+                        self.narrow(known.id, range)?;
+                    }
+                    Some(Told {
+                        id: known.id,
+                        fight: known.fight,
+                        battle: known.battle,
+                    })
+                }
+                (Some(row), Match::New, Some(place)) if new => Some(Told {
+                    id: self.list(row, place)?,
+                    fight: row.fight,
+                    battle: None,
+                }),
+                _ => None,
+            });
+        }
+        Ok(told)
     }
 
     /// Names a player; `false` when there is no such player.
@@ -339,6 +524,8 @@ mod tests {
     use super::{Player, Store};
     use crate::{
         history::{Battle, Fighter, Party, Plate},
+        list::{Ago, Row, Unit},
+        listing::{Fight, Sighting},
         opponent::Front,
     };
 
@@ -375,6 +562,7 @@ mod tests {
             attacker: party(2, 10000, damage),
             defender: party(5, 20000, damage),
             attacker_won: true,
+            user_attacked: true,
         }
     }
 
@@ -637,6 +825,7 @@ mod tests {
             attacker: party(5, 20000, 300),
             defender: party(2, 10000, 300),
             attacker_won: false,
+            user_attacked: false,
         };
         store.save(&back).unwrap();
         let kept = store.battles().unwrap();
@@ -657,5 +846,181 @@ mod tests {
         let kept = &store.battles().unwrap()[0];
         assert_eq!(named(&kept.defender).name.as_deref(), Some("ライバル"));
         assert_eq!(named(&kept.attacker).name, None);
+    }
+
+    /// A row of the game's list: a defense won against the player `opponent`, within the
+    /// hour that ends at `at`.
+    fn row(opponent: Option<i64>, at: i64) -> Sighting {
+        Sighting {
+            fight: Fight {
+                attacked: false,
+                won: true,
+                opponent,
+            },
+            range: (at - 3600, at),
+        }
+    }
+
+    #[test]
+    fn a_battle_kept_has_one_number() {
+        let store = store();
+        let first = store.keep(&battle(100)).unwrap();
+        assert!(first.new, "kept just now");
+        let again = store.keep(&battle(100)).unwrap();
+        assert_eq!((again.id, again.new), (first.id, false), "kept before");
+        let other = store.keep(&battle(200)).unwrap();
+        assert!(other.new && other.id != first.id, "another battle");
+        assert_eq!(store.battles().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_name_of_the_list_is_the_player_of_the_records() {
+        let store = store();
+        store.save(&battle(100)).unwrap();
+        let defender = named(&store.battles().unwrap()[0].defender).id;
+        assert_eq!(store.opponent(Some(&plate(5))).unwrap(), Some(defender));
+        let met = store.opponent(Some(&plate(7))).unwrap().expect("a player");
+        assert_ne!(met, defender, "a name not met is a new player");
+        assert_eq!(store.opponent(Some(&plate(7))).unwrap(), Some(met));
+        assert_eq!(store.opponent(None).unwrap(), None, "nobody");
+    }
+
+    #[test]
+    fn the_rows_listed_come_back_from_the_newest() {
+        let store = store();
+        let player = store.opponent(Some(&plate(3))).unwrap();
+        let older = store.list(&row(player, 5000), 1.0).unwrap();
+        let newer = store.list(&row(None, 9000), 2.0).unwrap();
+        let between = store.list(&row(player, 7000), 1.5).unwrap();
+        let listed = store.listed().unwrap();
+        let ids: Vec<i64> = listed.iter().map(|row| row.id).collect();
+        assert_eq!(ids, [newer, between, older]);
+        assert_eq!(listed[0].fight, row(None, 9000).fight);
+        assert_eq!(listed[0].range, (5400, 9000));
+        assert_eq!(listed[2].fight.opponent, player);
+        assert!(listed.iter().all(|row| row.battle.is_none()));
+        // The time told again, narrower.
+        store.narrow(older, (4000, 4500)).unwrap();
+        assert_eq!(store.listed().unwrap()[2].range, (4000, 4500));
+    }
+
+    #[test]
+    fn a_record_read_from_a_row_has_the_rows_time() {
+        let store = store();
+        let read = store.keep(&battle(100)).unwrap();
+        store.save(&battle(200)).unwrap();
+        let first = store.list(&row(None, 9000), 2.0).unwrap();
+        let second = store.list(&row(None, 9000), 1.0).unwrap();
+        store.link(first, read.id).unwrap();
+        let kept = store.battles().unwrap();
+        let fought = kept[1].fought.as_ref().expect("the battle read from a row");
+        assert_eq!(fought.within, 3600, "the hour the row allowed");
+        assert_eq!(fought.about.len(), "2026-11-18 00:10:00".len());
+        assert_eq!(kept[0].fought, None, "a battle no row told of");
+        assert_eq!(store.listed().unwrap()[0].battle, Some(read.id));
+        // The record turns out to be the other row's: one row, one record.
+        store.link(second, read.id).unwrap();
+        let listed = store.listed().unwrap();
+        assert_eq!((listed[0].battle, listed[1].battle), (None, Some(read.id)));
+        assert!(store.battles().unwrap()[1].fought.is_some());
+    }
+
+    #[test]
+    fn the_rows_in_sight_are_kept_and_told_again() {
+        let store = store();
+        let seen = [Some(row(None, 9000)), None, Some(row(None, 2000))];
+        let told = store.tell(&seen, true).unwrap();
+        let ids: Vec<Option<i64>> = told.iter().map(|row| row.map(|row| row.id)).collect();
+        assert!(
+            ids[0].is_some() && ids[2].is_some(),
+            "the rows read are kept"
+        );
+        assert_eq!(ids[1], None, "a row that did not read is not");
+        assert!(told.iter().flatten().all(|row| row.battle.is_none()));
+        // Seen again an hour on: the same rows, their times narrower.
+        let later = [
+            Some(Sighting {
+                range: (8000, 8500),
+                ..row(None, 9000)
+            }),
+            Some(row(None, 2000)),
+        ];
+        let again = store.tell(&later, true).unwrap();
+        let again: Vec<Option<i64>> = again.iter().map(|row| row.map(|row| row.id)).collect();
+        assert_eq!(again, [ids[0], ids[2]]);
+        let listed = store.listed().unwrap();
+        assert_eq!(listed.len(), 2, "no row twice");
+        assert_eq!(listed[0].range, (8000, 8500));
+        assert!(
+            listed[0].place > listed[1].place,
+            "the upper row is the newer"
+        );
+        // A record read from the first row shows with it.
+        let read = store.keep(&battle(100)).unwrap();
+        store.link(ids[0].unwrap(), read.id).unwrap();
+        let told = store.tell(&later, true).unwrap();
+        assert_eq!(told[0].and_then(|row| row.battle), Some(read.id));
+        assert_eq!(told[1].and_then(|row| row.battle), None);
+    }
+
+    #[test]
+    fn a_list_that_was_up_before_rio_looked_keeps_no_new_row() {
+        let store = store();
+        let kept = store.tell(&[Some(row(None, 9000))], true).unwrap();
+        // Its rows' times do not count: only the rows kept are told.
+        let seen = [Some(row(None, 9500)), Some(row(None, 9000))];
+        let told = store.tell(&seen, false).unwrap();
+        assert_eq!(told[1].map(|row| row.id), kept[0].map(|row| row.id));
+        assert_eq!(told[0], None, "a row never kept stays untold");
+        assert_eq!(store.listed().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_rows_a_frame_reads_are_told_a_row_for_a_row() {
+        let store = store();
+        // A defense won so many hours ago, against a name of so many strokes or nobody.
+        let row = |name: Option<u32>, count| {
+            Some(Row {
+                attacked: false,
+                won: true,
+                opponent: name.map(plate),
+                ago: Ago {
+                    count,
+                    unit: Unit::Hour,
+                },
+            })
+        };
+        // A list that came up just now: a player with a name, a row that did not read, and
+        // an anonymous player.
+        let told = store
+            .see(
+                &[row(Some(5), 2), None, row(None, 5)],
+                Some(100_000),
+                100_000,
+            )
+            .unwrap();
+        let first = told[0].expect("the first row is kept");
+        assert!(told[1].is_none() && told[2].is_some(), "a row for a row");
+        assert_eq!(
+            first.fight.opponent,
+            store.known(&plate(5)).unwrap(),
+            "the name is a player's now"
+        );
+        assert!(first.fight.opponent.is_some());
+        assert_eq!(told[2].expect("kept").fight.opponent, None, "nobody");
+        assert_eq!(
+            store.listed().unwrap()[0].range,
+            (100_000 - 3 * 3600, 100_000 - 2 * 3600),
+            "two hours ago and not yet three"
+        );
+        // An hour on, a list that was up before Rio looked: the row kept is told, a name
+        // not met is nobody's and its row no row.
+        let told = store
+            .see(&[row(Some(7), 1), row(Some(5), 3)], None, 103_600)
+            .unwrap();
+        assert_eq!(told[0], None);
+        assert_eq!(store.known(&plate(7)).unwrap(), None, "no player is made");
+        assert_eq!(told[1].map(|row| row.id), Some(first.id));
+        assert_eq!(store.listed().unwrap().len(), 2);
     }
 }

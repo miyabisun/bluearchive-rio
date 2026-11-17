@@ -315,6 +315,16 @@ fn a_defense_lost_is_read_with_lose_on_the_left() {
 }
 
 #[test]
+fn the_users_own_side_is_the_left_one() {
+    let reader = Reader::new();
+    let own = |screen: &RgbImage| reader.read(screen).expect("the record").user_attacked;
+    assert!(own(&fixture()), "the sword on the left");
+    assert!(own(&attacked()), "the sword and \"Lose\"");
+    assert!(!own(&defended()), "the shield on the left");
+    assert!(!own(&lost()), "the shield and \"Lose\"");
+}
+
+#[test]
 fn a_screen_without_the_record_is_not_read() {
     let reader = Reader::new();
     // The record's title covered: another dialog of the same layout.

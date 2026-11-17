@@ -3,7 +3,7 @@
 //! without a window.
 
 use crate::{
-    store::{Counsel, Tried},
+    store::{Counsel, Fought, Tried},
     watch::{Screen, Status},
 };
 
@@ -46,6 +46,12 @@ pub fn status_view(status: &Status) -> StatusView {
         Status::Watching(Some(Screen::Record { kept: true })) => (
             "戦闘履歴・登録済み",
             "この戦闘は登録済みです。「履歴」タブにあります。\n押すと読み取りを一時中断します。"
+                .to_owned(),
+            Tone::Active,
+        ),
+        Status::Watching(Some(Screen::List)) => (
+            "戦闘履歴の一覧",
+            "一覧の行を読んでいます。ゲームの上の「読み取り済み」「未読」は、その行の戦闘を登録したかどうかです。\n行の「履歴」から開いた戦闘には、行の時刻が付きます。\n押すと読み取りを一時中断します。"
                 .to_owned(),
             Tone::Active,
         ),
@@ -102,6 +108,30 @@ pub fn kept_at(seen_at: &str) -> &str {
     seen_at.get(5..16).unwrap_or(seen_at)
 }
 
+/// When a battle was, as closely as the game's list told it: "11-18 00:10 ごろ" where the
+/// row told the minute, "11-17 22時ごろ" where the hour, "11-16 ごろ" where the day.
+pub fn fought_at(fought: &Fought) -> String {
+    // "2026-11-18 00:10:30": the day, the hour, the minute.
+    let about = fought.about.as_str();
+    let (Some(day), Some(hour), Some(minute)) =
+        (about.get(5..10), about.get(11..13), about.get(11..16))
+    else {
+        return about.to_owned();
+    };
+    if fought.within <= MINUTES {
+        format!("{day} {minute} ごろ")
+    } else if fought.within <= HOURS {
+        format!("{day} {hour}時ごろ")
+    } else {
+        format!("{day} ごろ")
+    }
+}
+
+/// A time known within a quarter of an hour is told to the minute, one within three hours
+/// to the hour: a row tells a minute or an hour, and a list left open a little more.
+const MINUTES: i64 = 15 * 60;
+const HOURS: i64 = 3 * 3600;
+
 /// Where checking for an update and taking it stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateState {
@@ -127,9 +157,9 @@ pub fn update_text(update: &UpdateState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tone, expected_from, fared, kept_at, status_view};
+    use super::{Tone, expected_from, fared, fought_at, kept_at, status_view};
     use crate::{
-        store::{Counsel, Seen, Tried},
+        store::{Counsel, Fought, Seen, Tried},
         watch::{Screen, Status},
     };
 
@@ -149,6 +179,15 @@ mod tests {
         );
         let view = status_view(&Status::Watching(Some(Screen::Formation)));
         assert_eq!((view.label.as_str(), view.tone), ("編成", Tone::Active));
+        let view = status_view(&Status::Watching(Some(Screen::List)));
+        assert_eq!(
+            (view.label.as_str(), view.tone),
+            ("戦闘履歴の一覧", Tone::Active)
+        );
+        assert!(
+            view.title.contains("読み取り済み"),
+            "what the words over the rows say"
+        );
         // Any other screen of the game: nothing is being read there (Aoi's words).
         let view = status_view(&Status::Watching(None));
         assert_eq!(
@@ -201,6 +240,35 @@ mod tests {
             battles: 3,
         };
         assert_eq!(fared(&tried), "3戦2勝");
+    }
+
+    #[test]
+    fn a_battles_time_is_told_as_closely_as_the_list_told_it() {
+        let fought = |about: &str, within| Fought {
+            about: about.to_owned(),
+            within,
+        };
+        assert_eq!(
+            fought_at(&fought("2026-11-18 00:10:30", 60)),
+            "11-18 00:10 ごろ",
+            "a row that told the minute"
+        );
+        assert_eq!(
+            fought_at(&fought("2026-11-17 22:30:00", 3600)),
+            "11-17 22時ごろ",
+            "a row that told the hour"
+        );
+        assert_eq!(
+            fought_at(&fought("2026-11-16 12:00:00", 86400)),
+            "11-16 ごろ",
+            "a row that told the day"
+        );
+        // A row seen again as its words changed tells more closely than its words.
+        assert_eq!(
+            fought_at(&fought("2026-11-17 22:41:00", 240)),
+            "11-17 22:41 ごろ"
+        );
+        assert_eq!(fought_at(&fought("soon", 60)), "soon", "another shape");
     }
 
     #[test]
