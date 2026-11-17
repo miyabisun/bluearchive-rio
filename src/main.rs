@@ -9,7 +9,7 @@ use std::{collections::HashMap, error::Error, path::PathBuf};
 
 use bluearchive_rio::{
     aoi,
-    history::{Reader, Team},
+    history::Reader,
     store::{Kept, Player, Store},
     students,
 };
@@ -35,27 +35,26 @@ fn database() -> Result<PathBuf, Box<dyn Error>> {
 }
 
 /// A battle as the list shows it: the result, then each side's team in the players' terms
-/// (A1 to A4 and D1 to D4 the strikers from the left, SP the specials) with the damage.
+/// (A1 to A4 and D1 to D4 the strikers from the left, SP the specials).
 fn describe(battle: &Kept, names: &HashMap<i64, String>) -> String {
     let player = |player: &Player| match &player.name {
         Some(name) => format!("{name}(#{})", player.id),
         None => format!("プレイヤー#{}", player.id),
     };
-    let team = |team: &Team, side: char| {
-        let fighter = |slot: usize| {
-            let fighter = team[slot];
+    let team = |team: &[i64; 6], side: char| {
+        let student = |slot: usize| {
             let place = if slot < 4 {
                 format!("{side}{}", slot + 1)
             } else {
                 "SP".to_owned()
             };
             let name = names
-                .get(&fighter.student)
+                .get(&team[slot])
                 .cloned()
-                .unwrap_or_else(|| format!("生徒#{}", fighter.student));
-            format!("{place} {name} {}", fighter.damage)
+                .unwrap_or_else(|| format!("生徒#{}", team[slot]));
+            format!("{place} {name}")
         };
-        let of = |slots: std::ops::Range<usize>| slots.map(fighter).collect::<Vec<_>>().join(" / ");
+        let of = |slots: std::ops::Range<usize>| slots.map(student).collect::<Vec<_>>().join(" / ");
         format!("{} | {}", of(0..4), of(4..6))
     };
     format!(
@@ -175,18 +174,12 @@ fn watch() -> Result<(), Box<dyn Error>> {
 mod tests {
     use std::collections::HashMap;
 
-    use bluearchive_rio::{
-        history::Fighter,
-        store::{Kept, Player},
-    };
+    use bluearchive_rio::store::{Kept, Player};
 
     use super::describe;
 
     #[test]
     fn a_battle_is_shown_with_both_teams_in_the_players_order() {
-        let team = |fighters: [(i64, u32); 6]| {
-            fighters.map(|(student, damage)| Fighter { student, damage })
-        };
         let battle = Kept {
             id: 3,
             seen_at: "2026-11-17 03:10:00".to_owned(),
@@ -196,22 +189,8 @@ mod tests {
             },
             defender: Player { id: 2, name: None },
             attacker_won: true,
-            attack: team([
-                (1, 60812),
-                (2, 156_315),
-                (3, 720_028),
-                (4, 516_569),
-                (5, 543_051),
-                (6, 0),
-            ]),
-            defense: team([
-                (7, 162_341),
-                (2, 121_292),
-                (8, 194_176),
-                (9, 296_470),
-                (5, 573_064),
-                (99, 0),
-            ]),
+            attack: [1, 2, 3, 4, 5, 6],
+            defense: [7, 2, 8, 9, 5, 99],
         };
         let names: HashMap<i64, String> = [
             (1, "ホシノ"),
@@ -230,8 +209,8 @@ mod tests {
         assert_eq!(
             describe(&battle, &names),
             "#3 2026-11-17 03:10:00 攻撃側の勝ち
-  攻撃 シャーレの先生(#1): A1 ホシノ 60812 / A2 マリナ 156315 / A3 ヒビキ（応援団） 720028 / A4 ハスミ（水着） 516569 | SP イロハ 543051 / SP ミチル（ドレス） 0
-  防衛 プレイヤー#2: D1 アツコ 162341 / D2 マリナ 121292 / D3 トキ 194176 / D4 イオリ 296470 | SP イロハ 573064 / SP 生徒#99 0"
+  攻撃 シャーレの先生(#1): A1 ホシノ / A2 マリナ / A3 ヒビキ（応援団） / A4 ハスミ（水着） | SP イロハ / SP ミチル（ドレス）
+  防衛 プレイヤー#2: D1 アツコ / D2 マリナ / D3 トキ / D4 イオリ | SP イロハ / SP 生徒#99"
         );
     }
 }
