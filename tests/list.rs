@@ -83,6 +83,14 @@ const SIX: [(f32, Told); 3] = [
     (747.0, (true, false, true, 6, Unit::Minute)),
 ];
 
+/// The list's end: three attacks won 6 days ago. The reference of "日" is cut from another
+/// screen of the same list, scrolled elsewhere.
+const END: [(f32, Told); 3] = [
+    (509.0, (true, true, true, 6, Unit::Day)),
+    (684.0, (true, true, true, 6, Unit::Day)),
+    (858.0, (true, true, true, 6, Unit::Day)),
+];
+
 fn assert_rows(shown: &[Shown], rows: &[(f32, Told)], what: &str) {
     let tops: Vec<f32> = shown.iter().map(|shown| shown.top.round()).collect();
     let expected: Vec<f32> = rows.iter().map(|(top, _)| *top).collect();
@@ -106,6 +114,8 @@ fn the_rows_in_full_sight_are_read() {
     assert_rows(&shown, &FRESH, "the list right after a battle");
     let shown = reader.list(&screen("list-six")).expect("the list");
     assert_rows(&shown, &SIX, "a row six minutes old");
+    let shown = reader.list(&screen("list-end")).expect("the list");
+    assert_rows(&shown, &END, "rows days old, at the list's end");
 }
 
 #[test]
@@ -137,6 +147,7 @@ fn other_window_sizes_read_the_same_or_nothing() {
         ("list-attacks", &ATTACKS[..]),
         ("list-fresh", &FRESH[..]),
         ("list-six", &SIX[..]),
+        ("list-end", &END[..]),
     ];
     for (name, rows) in lists {
         let screen = screen(name);

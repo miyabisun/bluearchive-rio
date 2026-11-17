@@ -9,8 +9,9 @@
 //! place) that of `tests/fixtures/formation.png`.
 //!
 //! The letters of the time a row of the list of records tells ("5分前") are cut from the
-//! rows of `tests/fixtures/list.png` and `list-scrolled.png`. Those rows show the digits 0,
-//! 2, 3 and 5 only: the others are drawn from the countdown the game shows over the list
+//! rows of `tests/fixtures/list.png`, `list-scrolled.png` and `list-days.png`. Those rows
+//! show the digits 0, 2, 3, 5 and 6 only: the others are drawn from the countdown the game
+//! shows over the list
 //! (`tests/fixtures/timer.png`, ten frames of it, the last digit 0 to 9), whose digits are
 //! the same letters drawn bolder and smaller.
 //!
@@ -37,7 +38,7 @@ const WIDTHS: [u32; 4] = [1500, 1800, 2100, 2370];
 const DAMAGE: [&str; 6] = ["60812", "156315", "720028", "516569", "543051", "0"];
 
 /// The rows of the list's fixtures: a row's top, and the time it tells.
-const LISTS: [(&str, &[(f32, &str)]); 2] = [
+const LISTS: [(&str, &[(f32, &str)]); 3] = [
     (
         "list",
         &[(398.0, "5分前"), (573.0, "2時間前"), (747.0, "5時間前")],
@@ -49,6 +50,10 @@ const LISTS: [(&str, &[(f32, &str)]); 2] = [
             (551.0, "22時間前"),
             (726.0, "23時間前"),
         ],
+    ),
+    (
+        "list-days",
+        &[(396.0, "6日前"), (570.0, "6日前"), (745.0, "6日前")],
     ),
 ];
 

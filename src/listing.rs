@@ -142,7 +142,7 @@ pub fn narrowed(kept: (i64, i64), seen: (i64, i64)) -> (i64, i64) {
 }
 
 /// Where the new rows among those in sight stand: a place for each `Match::New`, between
-/// the places of the rows kept around it.
+/// the places of the rows kept around it; none for a new row whose place nothing tells.
 pub fn places(kept: &[Listed], seen: &[Option<Sighting>], matches: &[Match]) -> Vec<Option<f64>> {
     let mut places = vec![None; seen.len()];
     // The new rows from `from` up to `to`, spread between the places `above` and `under`.
@@ -169,16 +169,23 @@ pub fn places(kept: &[Listed], seen: &[Option<Sighting>], matches: &[Match]) -> 
         })
         .collect();
     let (Some(&(first, top)), Some(&(last, bottom))) = (told.first(), told.last()) else {
-        // No row kept in sight: the rows stand where their time puts them, under the rows
-        // kept that are newer than the first of them.
-        let middle = |range: (i64, i64)| range.0 + range.1;
-        let newest = seen.iter().flatten().map(|row| middle(row.range)).next();
-        let newer = kept
-            .iter()
-            .filter(|kept| newest.is_some_and(|newest| middle(kept.range) > newest))
-            .count();
-        let above = newer.checked_sub(1).and_then(place);
-        spread(0, seen.len(), above, place(newer));
+        // No row kept in sight: the rows stand where their times put them, if every row
+        // kept is surely newer than all of them or surely older. Among rows kept that may
+        // be as old (the rows of one day tell the same time), nothing in sight tells
+        // where they stand: they are left unplaced, to be kept once the list is scrolled
+        // over them and a row beside them.
+        let read = || seen.iter().flatten().map(|row| row.range);
+        let (Some(earliest), Some(latest)) = (
+            read().map(|range| range.0).min(),
+            read().map(|range| range.1).max(),
+        ) else {
+            return places;
+        };
+        let newer = kept.iter().take_while(|kept| kept.range.0 > latest).count();
+        if kept[newer..].iter().all(|kept| kept.range.1 < earliest) {
+            let above = newer.checked_sub(1).and_then(place);
+            spread(0, seen.len(), above, place(newer));
+        }
         return places;
     };
     spread(0, first, top.checked_sub(1).and_then(place), place(top));
@@ -476,6 +483,39 @@ mod tests {
             [Some(2.0), Some(1.0)],
             "the first rows ever"
         );
+    }
+
+    #[test]
+    fn a_new_row_is_not_placed_where_nothing_tells_its_place() {
+        // A row kept tells a day; the list scrolled far shows a row of the same day, and no
+        // row kept beside it: it may stand above the row kept or under it.
+        let day = |opponent, at: i64| {
+            Some(Sighting {
+                fight: fight(opponent),
+                range: (at - 86400, at),
+            })
+        };
+        let rows = vec![Listed {
+            id: 100,
+            place: 1.0,
+            fight: fight(1),
+            range: (500_000 - 86400, 500_000),
+            battle: None,
+        }];
+        let seen = [day(2, 500_030), day(3, 500_030)];
+        let matches = align(&rows, &seen);
+        assert_eq!(matches, [New, New]);
+        assert_eq!(places(&rows, &seen, &matches), [None, None]);
+        // Seen with the row kept beside them, they stand under it.
+        let seen = [day(1, 500_030), day(2, 500_030), day(3, 500_030)];
+        let matches = align(&rows, &seen);
+        assert_eq!(
+            places(&rows, &seen, &matches),
+            [None, Some(0.0), Some(-1.0)]
+        );
+        // Rows a day older than all kept stand under them, whatever is in sight.
+        let seen = [day(2, 400_000)];
+        assert_eq!(places(&rows, &seen, &align(&rows, &seen)), [Some(0.0)]);
     }
 
     #[test]

@@ -137,9 +137,7 @@ fn tops(white: &[bool], tall: f32, slack: f32) -> Vec<f32> {
 const EM: f32 = 33.4;
 const DIGIT: f32 = 20.0;
 const AGO_TALL: (f32, f32) = (27.0, 37.0);
-/// The kanji of a time, in the order of their references (`data/ago-kanji.png`). No screen
-/// at hand shows "日前" whole yet (2026-11-18): until its reference is cut, a row a day old
-/// or older is not read.
+/// The kanji of a time, in the order of their references (`data/ago-kanji.png`).
 pub const KANJI: [char; 5] = ['分', '時', '間', '前', '日'];
 /// A letter is its reference from this near (the references' own letters lay 14.3 from
 /// each other at most, another kanji 66.3 at least; a digit drawn from the game's bolder
