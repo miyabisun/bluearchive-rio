@@ -1,11 +1,14 @@
 //! Watches Blue Archive's tactical challenge (戦術対抗戦, the 6 on 6 PvP) and keeps what it
 //! shows: the battle records (`history`) in a database (`store`), told with the students of
-//! the SchaleDB snapshot, and the students held as Aoi wrote them (`aoi`).
+//! the SchaleDB snapshot, and the students held as Aoi wrote them (`aoi`). Before a battle
+//! it reads what the opponent's dialog shows of the defense (`opponent`), to look up what
+//! stood behind it in the records.
 
 pub mod aoi;
 #[cfg(windows)]
 pub mod capture;
 pub mod history;
+pub mod opponent;
 pub mod store;
 
 use include_dir::{Dir, include_dir};

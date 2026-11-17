@@ -40,6 +40,15 @@ pub struct Player {
     pub name: Option<String>,
 }
 
+/// A defense seen before behind a first striker and two specials: the strikers D2 to D4,
+/// the battles that showed them so, and when the last of those was seen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seen {
+    pub rest: [i64; 3],
+    pub battles: u32,
+    pub last_seen: String,
+}
+
 pub struct Store(Connection);
 
 impl Store {
@@ -162,6 +171,27 @@ impl Store {
             .collect()
     }
 
+    /// The defenses kept whose first striker and specials are these, the most seen first:
+    /// what stood behind them. Only defenses are looked at: an attack's field differs.
+    pub fn defenses(&self, first: i64, mut specials: [i64; 2]) -> rusqlite::Result<Vec<Seen>> {
+        specials.sort_unstable();
+        let mut defenses = self.0.prepare(
+            "SELECT d2, d3, d4, COUNT(*), MAX(seen_at) FROM battles
+             WHERE d1 = ?1 AND dsp1 = ?2 AND dsp2 = ?3
+             GROUP BY d2, d3, d4
+             ORDER BY COUNT(*) DESC, MAX(seen_at) DESC, d2, d3, d4",
+        )?;
+        defenses
+            .query_map([first, specials[0], specials[1]], |row| {
+                Ok(Seen {
+                    rest: [row.get(0)?, row.get(1)?, row.get(2)?],
+                    battles: row.get(3)?,
+                    last_seen: row.get(4)?,
+                })
+            })?
+            .collect()
+    }
+
     /// Names a player; `false` when there is no such player.
     pub fn name(&self, player: i64, name: &str) -> rusqlite::Result<bool> {
         let named = self.0.execute(
@@ -277,6 +307,33 @@ mod tests {
         assert!(
             !store.name(2, "だれか").unwrap(),
             "no player is made for the anonymous"
+        );
+    }
+
+    #[test]
+    fn the_defenses_behind_a_first_striker_are_counted() {
+        let store = store();
+        // The same defense twice, one with another second striker, one of another first.
+        store.save(&battle(100)).unwrap();
+        store.save(&battle(200)).unwrap();
+        let mut other = battle(300);
+        other.defender.team[1].student = 29001;
+        store.save(&other).unwrap();
+        let mut apart = battle(400);
+        apart.defender.team[0].student = 29999;
+        store.save(&apart).unwrap();
+
+        // The specials are asked for in either order.
+        let seen = store.defenses(20000, [20005, 20004]).unwrap();
+        let counted: Vec<_> = seen.iter().map(|seen| (seen.rest, seen.battles)).collect();
+        assert_eq!(
+            counted,
+            [([20001, 20002, 20003], 2), ([29001, 20002, 20003], 1)]
+        );
+        assert!(seen.iter().all(|seen| !seen.last_seen.is_empty()));
+        assert!(
+            store.defenses(10000, [10004, 10005]).unwrap().is_empty(),
+            "an attack is not counted as a defense"
         );
     }
 

@@ -9,7 +9,10 @@
 //! The references in `data/` (the title, the two roles' pictures and the digits) are cut
 //! from a screen by `cargo run --example make_refs`; the students' faces are SchaleDB's icons.
 
-use std::time::{Duration, Instant};
+use std::{
+    ops::Range,
+    time::{Duration, Instant},
+};
 
 use image::{
     GrayImage, Luma, Rgb, RgbImage,
@@ -60,7 +63,7 @@ const SMALLEST: f32 = 1500.0;
 const SIDE: f32 = 1179.0;
 
 /// A part of the measured screen: left, top, right, bottom.
-type Area = (f32, f32, f32, f32);
+pub(crate) type Area = (f32, f32, f32, f32);
 /// "戦闘履歴".
 const TITLE: Area = (1070.0, 190.0, 1300.0, 260.0);
 /// The sword of the attacker or the shield of the defender. The right side's lies
@@ -86,7 +89,7 @@ const LABELS: (f32, f32) = (480.0, 965.0);
 const LABEL_HALF: f32 = 69.0;
 
 /// The sizes the parts are compared at.
-const TITLE_SIZE: (u32, u32) = (46, 14);
+pub(crate) const TITLE_SIZE: (u32, u32) = (46, 14);
 const ROLE_SIZE: (u32, u32) = (16, 16);
 const ICON_SIZE: (u32, u32) = (16, 16);
 const DIGIT_SIZE: (u32, u32) = (10, 14);
@@ -95,14 +98,14 @@ const PLATE_HEIGHT: u32 = 32;
 
 /// A frame and how large it draws the game: the measured screen's parts scale with the
 /// width of a 16:9 window (Aoi's `screen::unit`) about the frame's middle.
-struct Sheet<'a> {
+pub(crate) struct Sheet<'a> {
     frame: &'a RgbImage,
     scale: f32,
 }
 
 impl<'a> Sheet<'a> {
     /// `None` for a screen too small to read, or upright.
-    fn of(frame: &'a RgbImage) -> Option<Self> {
+    pub(crate) fn of(frame: &'a RgbImage) -> Option<Self> {
         let (width, height) = (frame.width() as f32, frame.height() as f32);
         let wide = width * 9.0 / 16.0;
         let unit = if (wide - height).abs() < 1.0 {
@@ -118,7 +121,7 @@ impl<'a> Sheet<'a> {
     }
 
     /// The frame's pixels of `area`, moved `shift` to the right.
-    fn crop(&self, (left, top, right, bottom): Area, shift: f32) -> Option<RgbImage> {
+    pub(crate) fn crop(&self, (left, top, right, bottom): Area, shift: f32) -> Option<RgbImage> {
         let x =
             |x: f32| self.frame.width() as f32 / 2.0 + (x + shift - MEASURED.0 / 2.0) * self.scale;
         let y = |y: f32| self.frame.height() as f32 / 2.0 + (y - MEASURED.1 / 2.0) * self.scale;
@@ -162,7 +165,7 @@ fn dark(pixel: &Rgb<u8>) -> bool {
 /// How much of a pixel is the dark ink of the title and the names: none of the white and
 /// the pink behind them, nor of the flowers around a player's picture. By degrees: cut at
 /// one darkness, a letter's thin strokes came and went with the window's size.
-fn ink(pixel: &Rgb<u8>) -> u8 {
+pub(crate) fn ink(pixel: &Rgb<u8>) -> u8 {
     ((190 - range(pixel).0) * 2).clamp(0, 255) as u8
 }
 /// A column of a name's line holds a letter from this much ink.
@@ -182,7 +185,11 @@ fn blue(pixel: &Rgb<u8>) -> u8 {
 
 /// How much of `of` each pixel of `area` is, as a picture of `size`: a shape to compare
 /// whatever the window's size.
-fn shape(area: &RgbImage, of: fn(&Rgb<u8>) -> u8, (width, height): (u32, u32)) -> GrayImage {
+pub(crate) fn shape(
+    area: &RgbImage,
+    of: fn(&Rgb<u8>) -> u8,
+    (width, height): (u32, u32),
+) -> GrayImage {
     let drawn = GrayImage::from_fn(area.width(), area.height(), |x, y| {
         Luma([of(area.get_pixel(x, y))])
     });
@@ -190,7 +197,7 @@ fn shape(area: &RgbImage, of: fn(&Rgb<u8>) -> u8, (width, height): (u32, u32)) -
 }
 
 /// How alike two pictures of one size are: their correlation, -1 for a flat one.
-fn likeness(a: &GrayImage, b: &GrayImage) -> f32 {
+pub(crate) fn likeness(a: &GrayImage, b: &GrayImage) -> f32 {
     let n = a.len() as f32;
     let (mut sa, mut sb, mut saa, mut sbb, mut sab) = (0.0f32, 0.0, 0.0, 0.0, 0.0);
     for (a, b) in a.iter().zip(b.iter()) {
@@ -503,18 +510,19 @@ impl Face {
         }
     }
 
-    /// The mean difference from a square of the screen brought to `FACE_SIZE`.
-    fn distance(&self, patch: &[[u8; 3]]) -> f32 {
-        let sum: u32 = self
-            .pixels
-            .iter()
-            .map(|(at, colour)| {
-                (0..3)
+    /// The mean difference from a square of the screen brought to `FACE_SIZE`, over the
+    /// `rows` of the icon the screen shows.
+    fn distance(&self, patch: &[[u8; 3]], rows: &Range<u32>) -> f32 {
+        let (mut sum, mut count) = (0u32, 0u32);
+        for (at, colour) in &self.pixels {
+            if rows.contains(&(*at as u32 / FACE_SIZE)) {
+                sum += (0..3)
                     .map(|c| u32::from(colour[c].abs_diff(patch[*at][c])))
-                    .sum::<u32>()
-            })
-            .sum();
-        sum as f32 / (self.pixels.len() * 3) as f32
+                    .sum::<u32>();
+                count += 3;
+            }
+        }
+        sum as f32 / count.max(1) as f32
     }
 }
 
@@ -526,7 +534,7 @@ const FACE_NEAR: f32 = 10.0;
 const DIGIT_NEAR: f32 = 25.0;
 /// the title was 0.989 like its reference at least, a role's picture 0.99 like its own
 /// and 0.63 like the other at most.
-const LIKE: f32 = 0.9;
+pub(crate) const LIKE: f32 = 0.9;
 /// A player's picture this little like the "?" is another picture; one between is not read.
 /// Over two screens drawn at the same 291 widths, the "?" was 0.987 like its reference at
 /// least, and two players' own pictures 0.034 at most.
@@ -549,6 +557,8 @@ pub struct Reader {
     /// The digits 0 to 9.
     digits: Vec<GrayImage>,
     faces: Vec<Face>,
+    /// "対戦相手", the title of the dialog `opponent` reads.
+    pub(crate) front: GrayImage,
 }
 
 impl Default for Reader {
@@ -572,6 +582,7 @@ impl Reader {
                 reference(include_bytes!("../data/defense.png")),
             ],
             anonymous: reference(include_bytes!("../data/anonymous.png")),
+            front: reference(include_bytes!("../data/opponent.png")),
             digits: (0..10)
                 .map(|digit| {
                     imageops::crop_imm(&digits, digit * DIGIT_SIZE.0, 0, DIGIT_SIZE.0, DIGIT_SIZE.1)
@@ -649,15 +660,27 @@ impl Reader {
     /// little larger, smaller and off its place: an icon's face fills its square more or
     /// less (マリナ's fitted 86 wide where the others fitted 80 to 83).
     fn student(&self, sheet: &Sheet, right: bool, slot: usize, squad: Squad) -> Option<i64> {
-        let middle = FACE.0 + slot as f32 * FACE_STEP;
+        let middle = (FACE.0 + slot as f32 * FACE_STEP + shift(right), FACE.1);
+        self.face(sheet, middle, FACE_SIDE, &(0..FACE_SIZE), squad)
+    }
+
+    /// The student of `squad` whose icon a screen draws about `middle` in a square of
+    /// `side`, showing the `rows` of it (of `FACE_SIZE`).
+    pub(crate) fn face(
+        &self,
+        sheet: &Sheet,
+        middle: (f32, f32),
+        side: f32,
+        rows: &Range<u32>,
+        squad: Squad,
+    ) -> Option<i64> {
         let mut patches = Vec::new();
         for size in [0.94, 1.0, 1.06] {
             for down in [-1.5, 0.0, 1.5] {
                 for across in [-1.5, 0.0, 1.5] {
-                    let half = FACE_SIDE * size / 2.0;
-                    let (x, y) = (middle + across, FACE.1 + down);
-                    let square =
-                        sheet.crop((x - half, y - half, x + half, y + half), shift(right))?;
+                    let half = side * size / 2.0;
+                    let (x, y) = (middle.0 + across, middle.1 + down);
+                    let square = sheet.crop((x - half, y - half, x + half, y + half), 0.0)?;
                     let patch =
                         imageops::resize(&square, FACE_SIZE, FACE_SIZE, FilterType::Triangle);
                     patches.push(patch.pixels().map(|pixel| pixel.0).collect::<Vec<_>>());
@@ -672,7 +695,7 @@ impl Reader {
         let nearest = |face: &&Face| {
             patches
                 .iter()
-                .map(|patch| face.distance(patch))
+                .map(|patch| face.distance(patch, rows))
                 .fold(f32::MAX, f32::min)
         };
         clear(known.iter().map(nearest), FACE_NEAR).map(|at| known[at].student)

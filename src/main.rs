@@ -1,22 +1,25 @@
 //! Rio's command line.
 //!   bluearchive-rio                       watches the game and keeps the battle records shown
 //!   bluearchive-rio read <png>...         keeps the records of screenshots
+//!   bluearchive-rio predict <png>...      the defenses seen behind a screenshot's opponent
 //!   bluearchive-rio list                  the battles kept, the latest first
 //!   bluearchive-rio name <player> <name>  names a player
 //!   bluearchive-rio roster                the students held, as Aoi wrote them
 
-use std::{collections::HashMap, error::Error, path::PathBuf};
+use std::{collections::HashMap, error::Error, ops::Range, path::PathBuf};
 
 use bluearchive_rio::{
     aoi,
     history::Reader,
-    store::{Kept, Player, Store},
+    opponent::Front,
+    store::{Kept, Player, Seen, Store},
     students,
 };
 
 const USAGE: &str = "使い方:
   bluearchive-rio                         ゲームを見て、表示された戦闘履歴を登録する
   bluearchive-rio read <png>...           スクリーンショットの戦闘履歴を登録する
+  bluearchive-rio predict <png>...        スクリーンショットの対戦相手の、防衛の編成を予測する
   bluearchive-rio list                    登録した戦闘を新しい順に表示する
   bluearchive-rio name <プレイヤー番号> <名前>  プレイヤーに名前を付ける
   bluearchive-rio roster                  Aoi が書き出した手持ちの生徒を表示する";
@@ -58,7 +61,7 @@ fn describe(battle: &Kept, names: &HashMap<i64, String>) -> String {
                 .unwrap_or_else(|| format!("生徒#{}", team[slot]));
             format!("{place} {name}")
         };
-        let of = |slots: std::ops::Range<usize>| slots.map(student).collect::<Vec<_>>().join(" / ");
+        let of = |slots: Range<usize>| slots.map(student).collect::<Vec<_>>().join(" / ");
         format!("{} | {}", of(0..4), of(4..6))
     };
     format!(
@@ -75,6 +78,34 @@ fn describe(battle: &Kept, names: &HashMap<i64, String>) -> String {
         player(&battle.defender),
         team(&battle.defense, 'D'),
     )
+}
+
+/// What the records tell of the defense behind an opponent's front: the strikers seen
+/// behind the same first striker and specials, the most seen first.
+fn foretell(front: &Front, seen: &[Seen], names: &HashMap<i64, String>) -> String {
+    let name = |student: &i64| {
+        names
+            .get(student)
+            .cloned()
+            .unwrap_or_else(|| format!("生徒#{student}"))
+    };
+    let mut told = format!(
+        "対戦相手の防衛: D1 {} | SP {} / SP {}",
+        name(&front.first),
+        name(&front.specials[0]),
+        name(&front.specials[1])
+    );
+    if seen.is_empty() {
+        told.push_str("\n  同じ D1 とスペシャルの防衛は、まだ登録がありません");
+    }
+    for defense in seen {
+        let [second, third, fourth] = defense.rest.each_ref().map(name);
+        told.push_str(&format!(
+            "\n  {}回 D2 {second} / D3 {third} / D4 {fourth} (最後に登録 {})",
+            defense.battles, defense.last_seen
+        ));
+    }
+    told
 }
 
 fn names() -> HashMap<i64, String> {
@@ -105,6 +136,19 @@ fn run() -> Result<(), Box<dyn Error>> {
                     Some(_) => "登録済みです",
                 };
                 println!("{path}: {outcome}");
+            }
+            Ok(())
+        }
+        ["predict", paths @ ..] if !paths.is_empty() => {
+            let (reader, store, names) = (Reader::new(), Store::open(&database()?)?, names());
+            for path in paths {
+                match reader.front(&image::open(path)?.to_rgb8()) {
+                    None => println!("{path}: 対戦相手の画面を読めませんでした"),
+                    Some(front) => {
+                        let seen = store.defenses(front.first, front.specials)?;
+                        println!("{path}: {}", foretell(&front, &seen, &names));
+                    }
+                }
             }
             Ok(())
         }
@@ -151,10 +195,17 @@ fn watch() -> Result<(), Box<dyn Error>> {
     use bluearchive_rio::{capture, history::Steady};
 
     let (reader, store, names) = (Reader::new(), Store::open(&database()?)?, names());
-    let mut steady = Steady::new();
-    println!("戦闘履歴を開くと登録します。終わるときは Ctrl+C を押してください。");
+    let (mut steady, mut fronts) = (Steady::new(), Steady::new());
+    println!(
+        "戦闘履歴を開くと登録し、対戦相手を選ぶと防衛の編成を予測します。終わるときは Ctrl+C を押してください。"
+    );
     for frame in capture::frames(|message| println!("{message}")) {
-        let Some(battle) = steady.see(reader.read(&frame), std::time::Instant::now()) else {
+        let now = std::time::Instant::now();
+        if let Some(front) = fronts.see(reader.front(&frame), now) {
+            let seen = store.defenses(front.first, front.specials)?;
+            println!("{}", foretell(front, &seen, &names));
+        }
+        let Some(battle) = steady.see(reader.read(&frame), now) else {
             continue;
         };
         if store.save(battle)? {
@@ -178,9 +229,60 @@ fn watch() -> Result<(), Box<dyn Error>> {
 mod tests {
     use std::collections::HashMap;
 
-    use bluearchive_rio::store::{Kept, Player};
+    use bluearchive_rio::{
+        opponent::Front,
+        store::{Kept, Player, Seen},
+    };
 
-    use super::describe;
+    use super::{describe, foretell};
+
+    fn names() -> HashMap<i64, String> {
+        [
+            (1, "ホシノ"),
+            (2, "マリナ"),
+            (3, "ヒビキ（応援団）"),
+            (4, "ハスミ（水着）"),
+            (5, "イロハ"),
+            (6, "ミチル（ドレス）"),
+            (7, "アツコ"),
+            (8, "トキ"),
+            (9, "イオリ"),
+        ]
+        .into_iter()
+        .map(|(id, name)| (id, name.to_owned()))
+        .collect()
+    }
+
+    #[test]
+    fn the_defenses_seen_behind_a_front_are_told_in_their_order() {
+        let front = Front {
+            first: 7,
+            specials: [5, 6],
+        };
+        let seen = [
+            Seen {
+                rest: [2, 8, 9],
+                battles: 2,
+                last_seen: "2026-11-17 13:14:04".to_owned(),
+            },
+            Seen {
+                rest: [2, 9, 99],
+                battles: 1,
+                last_seen: "2026-11-16 21:00:00".to_owned(),
+            },
+        ];
+        assert_eq!(
+            foretell(&front, &seen, &names()),
+            "対戦相手の防衛: D1 アツコ | SP イロハ / SP ミチル（ドレス）
+  2回 D2 マリナ / D3 トキ / D4 イオリ (最後に登録 2026-11-17 13:14:04)
+  1回 D2 マリナ / D3 イオリ / D4 生徒#99 (最後に登録 2026-11-16 21:00:00)"
+        );
+        assert_eq!(
+            foretell(&front, &[], &names()),
+            "対戦相手の防衛: D1 アツコ | SP イロハ / SP ミチル（ドレス）
+  同じ D1 とスペシャルの防衛は、まだ登録がありません"
+        );
+    }
 
     #[test]
     fn a_battle_is_shown_with_both_teams_in_the_players_order() {
@@ -196,20 +298,7 @@ mod tests {
             attack: [1, 2, 3, 4, 5, 6],
             defense: [7, 2, 8, 9, 5, 99],
         };
-        let names: HashMap<i64, String> = [
-            (1, "ホシノ"),
-            (2, "マリナ"),
-            (3, "ヒビキ（応援団）"),
-            (4, "ハスミ（水着）"),
-            (5, "イロハ"),
-            (6, "ミチル（ドレス）"),
-            (7, "アツコ"),
-            (8, "トキ"),
-            (9, "イオリ"),
-        ]
-        .into_iter()
-        .map(|(id, name)| (id, name.to_owned()))
-        .collect();
+        let names = names();
         assert_eq!(
             describe(&battle, &names),
             "#3 2026-11-17 03:10:00 攻撃側の勝ち
