@@ -6,12 +6,15 @@
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
+    time::{Duration, Instant},
 };
 
 use crate::{
     history::Plate,
+    list::{ROW_ACROSS, ROW_TALL, Row, Shown},
+    listing::{self, Fight, Pointed, Told},
     opponent::Front,
-    store::{Counsel, Kept},
+    store::{Counsel, Kept, Store},
 };
 
 /// A screen of the game that Rio reads.
@@ -58,6 +61,96 @@ pub enum Update {
     Opponent(Opponent),
 }
 
+/// A record is taken for opened from the list when it shows this shortly after the list.
+const OPENING: Duration = Duration::from_secs(3);
+
+/// The list of records from frame to frame: what its rows read in the frame before, the rows
+/// as they were last told with their tops, and which of those the pointer was over last (a
+/// record opens from the row whose button is pressed).
+#[derive(Default)]
+#[cfg_attr(not(windows), allow(dead_code))]
+struct Listing {
+    before: Vec<Option<Row>>,
+    told: Option<(Instant, Vec<Option<Told>>, Vec<f32>)>,
+    over: Pointed,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl Listing {
+    /// A frame of the list read at `now`: its rows in full sight, the list up `since` (see
+    /// `listing::Up`), `clock` the seconds since 1970. The rows are told (and kept, see
+    /// `Store::see`) once two frames in a row read them the same: a list that comes up or
+    /// goes is drawn faint for a few frames. For each row told: its top, and whether its
+    /// record was read. `None` for a frame that tells nothing: a record coming up over
+    /// the list dims it, and it shows no row in full; what was told stays as it is then.
+    fn see(
+        &mut self,
+        store: &Store,
+        rows: &[Shown],
+        since: Option<i64>,
+        clock: i64,
+        now: Instant,
+    ) -> rusqlite::Result<Option<Vec<(f32, bool)>>> {
+        let read: Vec<Option<Row>> = rows.iter().map(|shown| shown.row.clone()).collect();
+        let steady = !read.is_empty() && same_rows(&read, &self.before);
+        self.before = read;
+        if !steady {
+            return Ok(None);
+        }
+        let told = store.see(&self.before, since, clock)?;
+        let tops: Vec<f32> = rows.iter().map(|shown| shown.top).collect();
+        let read = tops.iter().zip(&told);
+        let read = read.filter_map(|(top, told)| told.map(|told| (*top, told.battle.is_some())));
+        let read = read.collect();
+        self.told = Some((now, told, tops));
+        Ok(Some(read))
+    }
+
+    /// A frame that shows no list.
+    fn miss(&mut self) {
+        self.before.clear();
+    }
+
+    /// Where the pointer is on the measured screen (`None` off the game): which of the
+    /// rows last told it is over.
+    fn point(&mut self, at: Option<(f32, f32)>) {
+        if let Some((_, _, tops)) = &self.told {
+            self.over = listing::pointed(at, tops, ROW_TALL, ROW_ACROSS);
+        }
+    }
+
+    /// The row a record was opened from (see `listing::opened`), if the record first
+    /// showed at `shown`, shortly after the list: the record's fight, the battle's number.
+    fn opened(&self, shown: Instant, fight: Fight, battle: i64) -> Option<i64> {
+        let (seen, rows, _) = self.told.as_ref()?;
+        (shown.duration_since(*seen) <= OPENING)
+            .then(|| listing::opened(rows, self.over, fight, battle))?
+    }
+}
+
+/// Whether two frames read the list's rows the same: a row for a row, the names drawn the
+/// same (see `history::Plate::same`).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn same_rows(now: &[Option<Row>], before: &[Option<Row>]) -> bool {
+    let same = |now: &Option<Row>, before: &Option<Row>| match (now, before) {
+        (Some(now), Some(before)) => {
+            (now.attacked, now.won, now.ago) == (before.attacked, before.won, before.ago)
+                && match (&now.opponent, &before.opponent) {
+                    (Some(now), Some(before)) => now.same(before),
+                    (None, None) => true,
+                    _ => false,
+                }
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    now.len() == before.len()
+        && now
+            .iter()
+            .zip(before)
+            .all(|(now, before)| same(now, before))
+}
+
 /// Starts reading the game, the records kept in the database at `database`. `paused` stops
 /// the reading while it is set; what is found goes to `report` with the status then.
 pub fn start(
@@ -93,7 +186,6 @@ fn run(
             atomic::Ordering,
             mpsc::{RecvTimeoutError, channel},
         },
-        time::{Duration, Instant},
     };
 
     use crate::{
@@ -101,15 +193,10 @@ fn run(
         capture::{self, Seen, Shot},
         guide::{self, Rank, Visit, Words},
         history::{self, Battle, Reader, Steady},
-        list::{ROW_ACROSS, ROW_TALL, Row},
-        listing::{self, Fight, Pointed, Shows, Told, Up},
+        listing::{Shows, Up},
         opponent,
         overlay::Overlay,
-        store::Store,
     };
-
-    /// A record is taken for opened from the list when it shows this shortly after the list.
-    const OPENING: Duration = Duration::from_secs(3);
 
     /// The seconds since 1970.
     fn clock() -> i64 {
@@ -131,28 +218,6 @@ fn run(
         let (x, y) = ((at.x - origin.0) as f32, (at.y - origin.1) as f32);
         let inside = x >= 0.0 && y >= 0.0 && x < size.0 as f32 && y < size.1 as f32;
         inside.then(|| history::measured(size, scale, (x, y)))
-    }
-
-    /// Whether two frames read the list's rows the same: a row for a row, the names drawn
-    /// the same (see `history::Plate::same`).
-    fn same_rows(now: &[Option<Row>], before: &[Option<Row>]) -> bool {
-        let same = |now: &Option<Row>, before: &Option<Row>| match (now, before) {
-            (Some(now), Some(before)) => {
-                (now.attacked, now.won, now.ago) == (before.attacked, before.won, before.ago)
-                    && match (&now.opponent, &before.opponent) {
-                        (Some(now), Some(before)) => now.same(before),
-                        (None, None) => true,
-                        _ => false,
-                    }
-            }
-            (None, None) => true,
-            _ => false,
-        };
-        now.len() == before.len()
-            && now
-                .iter()
-                .zip(before)
-                .all(|(now, before)| same(now, before))
     }
 
     /// A student's place in the formation dialog's list, where Aoi read all it is ordered by.
@@ -184,12 +249,9 @@ fn run(
     // The students held and their ranks, as Aoi wrote them when the opponent came up.
     let mut roster: Option<Vec<i64>> = None;
     let mut ranks: HashMap<i64, Rank> = HashMap::new();
-    // The list of records: how long it is up, what its rows read in the frame before, and
-    // the rows as they were last told with what the pointer was over then (a record opens
-    // from one of them).
+    // The list of records: how long it is up, and what it told from frame to frame.
     let mut up = Up::default();
-    let mut rows_before: Vec<Option<Row>> = Vec::new();
-    let mut told: Option<(Instant, Vec<Option<Told>>, Pointed)> = None;
+    let mut listing = Listing::default();
     // Since when a record shows, and whether the one told last was kept just then.
     let mut record_since: Option<Instant> = None;
     let mut fresh = false;
@@ -250,28 +312,23 @@ fn run(
             fresh = saved.new;
             // The row the record was opened from, where the list showed just before it: the
             // row's time is the battle's.
-            let opened = |seen: &Instant| {
-                record_since.is_some_and(|since| since.duration_since(*seen) <= OPENING)
+            let opponent = if battle.user_attacked {
+                &battle.defender
+            } else {
+                &battle.attacker
             };
-            let mut linked = false;
-            if let Some((_, rows, pointed)) = told.as_ref().filter(|(seen, ..)| opened(seen)) {
-                let opponent = if battle.user_attacked {
-                    &battle.defender
-                } else {
-                    &battle.attacker
-                };
-                let fight = Fight {
-                    attacked: battle.user_attacked,
-                    won: battle.attacker_won == battle.user_attacked,
-                    opponent: match &opponent.plate {
-                        Some(name) => store.known(name).map_err(records)?,
-                        None => None,
-                    },
-                };
-                if let Some(row) = listing::opened(rows, *pointed, fight, saved.id) {
-                    store.link(row, saved.id).map_err(records)?;
-                    linked = true;
-                }
+            let fight = Fight {
+                attacked: battle.user_attacked,
+                won: battle.attacker_won == battle.user_attacked,
+                opponent: match &opponent.plate {
+                    Some(name) => store.known(name).map_err(records)?,
+                    None => None,
+                },
+            };
+            let row = record_since.and_then(|shown| listing.opened(shown, fight, saved.id));
+            let linked = row.is_some();
+            if let Some(row) = row {
+                store.link(row, saved.id).map_err(records)?;
             }
             if saved.new || linked {
                 report(
@@ -305,26 +362,19 @@ fn run(
         }
         if let Some(rows) = &listed {
             screen = Some(Screen::List);
-            let read: Vec<Option<Row>> = rows.iter().map(|shown| shown.row.clone()).collect();
-            // The rows are told once two frames in a row read them the same: a list that
-            // comes up or goes is drawn faint for a few frames.
-            if same_rows(&read, &rows_before) {
-                let rows_told = store.see(&read, since, clock()).map_err(records)?;
-                let tops: Vec<f32> = rows.iter().map(|shown| shown.top).collect();
-                let read_rows: Vec<(f32, bool)> = tops
-                    .iter()
-                    .zip(&rows_told)
-                    .filter_map(|(top, told)| told.map(|told| (*top, told.battle.is_some())))
-                    .collect();
-                marks = guide::for_list(&read_rows, since.is_some());
-                // The pointer's place is in the screen's pixels only on the overlay's thread.
-                let at = overlay.as_ref().and_then(|_| pointer(&shot));
-                let over = listing::pointed(at, &tops, ROW_TALL, ROW_ACROSS);
-                told = Some((now, rows_told, over));
+            let told = listing.see(&store, rows, since, clock(), now);
+            if let Some(read) = told.map_err(records)? {
+                marks = guide::for_list(&read, since.is_some());
             }
-            rows_before = read;
         } else {
-            rows_before.clear();
+            listing.miss();
+        }
+        // The row the pointer is over: asked while the list shows (dimmed under a record
+        // coming up as well) and as a record first shows, when the pointer still lies where
+        // the button was pressed. Its place is in the screen's pixels only on the overlay's
+        // thread.
+        if listed.is_some() || record_since == Some(now) {
+            listing.point(overlay.as_ref().and_then(|_| pointer(&shot)));
         }
         let (dialog, forming) = (reader.front(frame), reader.formation(frame));
         if let Some(front) = dialog {
@@ -375,5 +425,128 @@ fn run(
             }
         }
         tell(Status::Watching(screen), &mut status);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::Path,
+        time::{Duration, Instant},
+    };
+
+    use image::{GrayImage, Luma};
+
+    use super::Listing;
+    use crate::{
+        history::{Battle, Fighter, Party, Plate},
+        list::{Ago, Row, Shown, Unit},
+        listing::Fight,
+        store::Store,
+    };
+
+    /// A name of `strokes` upright strokes.
+    fn plate(strokes: u32) -> Plate {
+        let mut drawn = GrayImage::new(80, 32);
+        for stroke in 0..strokes {
+            for y in 4..28 {
+                for x in 0..4 {
+                    drawn.put_pixel(4 + stroke * 12 + x, y, Luma([255]));
+                }
+            }
+        }
+        Plate(drawn)
+    }
+
+    /// A row with its top at `top`: a defense won `minutes` ago against the player of a name.
+    fn shown(top: f32, name: u32, minutes: u32) -> Shown {
+        let ago = Ago {
+            count: minutes,
+            unit: Unit::Minute,
+        };
+        Shown {
+            top,
+            row: Some(Row {
+                attacked: false,
+                won: true,
+                opponent: Some(plate(name)),
+                ago,
+            }),
+        }
+    }
+
+    /// The record of a defense the user won against the player of a name.
+    fn record(name: u32) -> Battle {
+        let party = |strokes: u32, first: i64| Party {
+            plate: Some(plate(strokes)),
+            team: [0, 1, 2, 3, 4, 5].map(|n| Fighter {
+                student: first + n,
+                damage: 100 + n as u32,
+            }),
+        };
+        Battle {
+            attacker: party(name, 10000),
+            defender: party(1, 20000),
+            attacker_won: false,
+            user_attacked: false,
+        }
+    }
+
+    #[test]
+    fn a_record_is_the_row_whose_button_was_pressed_though_the_list_dims_under_it() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let start = Instant::now();
+        let after = |millis: u64| start + Duration::from_millis(millis);
+        let mut listing = Listing::default();
+        let rows = [shown(398.0, 5, 1), shown(572.0, 7, 9)];
+        // The list comes up: told once two frames read the same, no record read yet.
+        assert_eq!(
+            listing.see(&store, &rows, Some(1000), 1000, start).unwrap(),
+            None,
+            "one frame is not enough"
+        );
+        let told = listing.see(&store, &rows, Some(1000), 1000, after(100));
+        assert_eq!(told.unwrap(), Some(vec![(398.0, false), (572.0, false)]));
+        // The first row's button is pressed. The record comes up over the list, which dims:
+        // for some frames it shows no row in full.
+        listing.point(Some((1750.0, 480.0)));
+        for frame in 2..5 {
+            let dimmed = listing.see(&store, &[], Some(1000), 1000, after(frame * 100));
+            assert_eq!(dimmed.unwrap(), None, "nothing to tell");
+            listing.point(Some((1750.0, 480.0)));
+        }
+        // The record is read: the user defended and won against the first row's player.
+        let battle = store.keep(&record(5)).unwrap();
+        let fight = Fight {
+            attacked: false,
+            won: true,
+            opponent: store.known(&plate(5)).unwrap(),
+        };
+        let first = store.listed().unwrap()[0].id;
+        assert_eq!(listing.opened(after(600), fight, battle.id), Some(first));
+        assert_eq!(
+            listing.opened(after(60_000), fight, battle.id),
+            None,
+            "a record that shows long after the list is no row's"
+        );
+        // Back on the list, the row tells that its record is read.
+        store.link(first, battle.id).unwrap();
+        listing
+            .see(&store, &rows, Some(1000), 1002, after(2000))
+            .unwrap();
+        let told = listing.see(&store, &rows, Some(1000), 1002, after(2100));
+        assert_eq!(told.unwrap(), Some(vec![(398.0, true), (572.0, false)]));
+    }
+
+    #[test]
+    fn the_pointer_tells_nothing_before_a_row_is_told() {
+        let mut listing = Listing::default();
+        listing.point(Some((1750.0, 480.0)));
+        let fight = Fight {
+            attacked: false,
+            won: true,
+            opponent: None,
+        };
+        assert_eq!(listing.opened(Instant::now(), fight, 1), None);
     }
 }

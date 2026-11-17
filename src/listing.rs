@@ -242,13 +242,14 @@ impl Up {
 }
 
 /// What the pointer is over as the list shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Pointed {
     /// The row in full sight at this index.
     Row(usize),
     /// The game, but none of the rows in full sight.
     Elsewhere,
     /// Not known: the pointer is not over the game.
+    #[default]
     Unknown,
 }
 
