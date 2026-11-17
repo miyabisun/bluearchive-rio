@@ -1,29 +1,32 @@
 //! Reading the battle record (戦闘履歴) from a screen: every part is read right or the
 //! record is not read at all. The fixtures are a 2370×1333 window's records, blacked out
-//! around the parts read; other window sizes are drawn from them.
+//! around the parts read; other window sizes are drawn from them. They show players' names,
+//! so the repository does not hold them: they lie in `tests/fixtures/` where Rio is
+//! developed, and these tests fail without them.
 
 use bluearchive_rio::history::{Battle, Fighter, Party, Plate, Reader};
 use image::{Rgb, RgbImage, imageops};
 
+fn screen(name: &str) -> RgbImage {
+    let path = format!("tests/fixtures/{name}.png");
+    image::open(&path)
+        .unwrap_or_else(|error| panic!("{path} (kept out of the repository): {error}"))
+        .to_rgb8()
+}
+
 /// A battle between two players with names.
 fn fixture() -> RgbImage {
-    image::open("tests/fixtures/history.png")
-        .expect("the fixture")
-        .to_rgb8()
+    screen("history")
 }
 
 /// A battle the same attacker won against an anonymous player.
 fn anonymous() -> RgbImage {
-    image::open("tests/fixtures/anonymous.png")
-        .expect("the fixture")
-        .to_rgb8()
+    screen("anonymous")
 }
 
 /// A battle the other fixtures' attacker defended and won: the shield is on the left.
 fn defended() -> RgbImage {
-    image::open("tests/fixtures/defended.png")
-        .expect("the fixture")
-        .to_rgb8()
+    screen("defended")
 }
 
 /// A screen as a window `width` wide draws it.

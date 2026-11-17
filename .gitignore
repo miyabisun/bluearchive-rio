@@ -1,1 +1,3 @@
 target/
+# Screens of the game show players' names.
+/tests/fixtures/

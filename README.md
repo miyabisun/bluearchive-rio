@@ -112,13 +112,16 @@ cargo test --locked
 
 main へ push する前に同じ検査を走らせるには、クローンごとに 1 回 `git config core.hooksPath .githooks` を実行します。
 
+読み取りのテスト（`tests/history.rs`）は、戦闘履歴の画面の画像を `tests/fixtures` から読みます。
+画面にはプレイヤーの名前が写るので、この画像はリポジトリに含めていません。画像が無いと、読み取りのテストは失敗します。
+
 - 生徒の一覧の更新: `powershell -File tools/schaledb/update.ps1` を実行します。
   [SchaleDB](https://schaledb.com/) から日本版の生徒の一覧とアイコンを `data/schaledb` に取り込みます。
 - 読み取りの手本の作り直し: `cargo run --example make_refs` を実行します。
-  `tests/fixtures/history.png` から、題字・攻撃と防衛の絵・ダメージの数字を `data/` に切り出します。
+  `tests/fixtures` の画面から、題字・攻撃と防衛の絵・ダメージの数字・匿名の「？」の絵を `data/` に切り出します。
 
 ## ライセンス
 
 プログラムは MIT（[LICENSE](LICENSE)）です。
-`data/schaledb/student-icons` の生徒のアイコンと `tests/fixtures` の画面は、ブルーアーカイブの画像です。
-これらの権利は NEXON Games と Yostar にあります。
+`data/schaledb/student-icons` の生徒のアイコンと、`data` にある手本の画像（画面から切り出した題字・絵・数字の形）は、
+ブルーアーカイブの画像です。これらの権利は NEXON Games と Yostar にあります。
