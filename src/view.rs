@@ -49,14 +49,21 @@ pub fn status_view(status: &Status) -> StatusView {
                 .to_owned(),
             Tone::Active,
         ),
-        Status::Watching(screen) => (
-            match screen {
-                Some(Screen::Opponent) => "対戦相手",
-                Some(Screen::Formation) => "編成",
-                Some(Screen::Record { .. }) | None => "読み取り中",
+        Status::Watching(Some(screen @ (Screen::Opponent | Screen::Formation))) => (
+            if *screen == Screen::Opponent {
+                "対戦相手"
+            } else {
+                "編成"
             },
             "ゲームのウィンドウを読んでいます。押すと読み取りを一時中断します。".to_owned(),
             Tone::Active,
+        ),
+        // Any other screen: "reading" there would say a record is still being read.
+        Status::Watching(None) => (
+            "対象外の画面",
+            "この画面は読み取りません。戦闘履歴・対戦相手・編成を開くと読み取ります。\n押すと読み取りを一時中断します。"
+                .to_owned(),
+            Tone::Idle,
         ),
         Status::Paused => (
             "一時中断",
@@ -142,10 +149,11 @@ mod tests {
         );
         let view = status_view(&Status::Watching(Some(Screen::Formation)));
         assert_eq!((view.label.as_str(), view.tone), ("編成", Tone::Active));
+        // Any other screen of the game: nothing is being read there (Aoi's words).
         let view = status_view(&Status::Watching(None));
         assert_eq!(
             (view.label.as_str(), view.tone),
-            ("読み取り中", Tone::Active)
+            ("対象外の画面", Tone::Idle)
         );
         assert_eq!(status_view(&Status::NoGame).tone, Tone::Idle);
         assert_eq!(status_view(&Status::Paused).label, "一時中断");
