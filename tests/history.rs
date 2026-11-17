@@ -19,6 +19,13 @@ fn anonymous() -> RgbImage {
         .to_rgb8()
 }
 
+/// A battle the other fixtures' attacker defended and won: the shield is on the left.
+fn defended() -> RgbImage {
+    image::open("tests/fixtures/defended.png")
+        .expect("the fixture")
+        .to_rgb8()
+}
+
 /// A screen as a window `width` wide draws it.
 fn drawn(screen: &RgbImage, width: u32) -> RgbImage {
     let height = (screen.height() as f32 * width as f32 / screen.width() as f32).round() as u32;
@@ -93,6 +100,47 @@ fn assert_the_anonymous_record(battle: &Battle, width: u32) {
     assert!(battle.attacker.plate.is_some(), "a picture, at {width}");
 }
 
+/// The record of the defense: ヒフミ（レーシング）, アツコ, イオリ, マリナ with イロハ and
+/// シロコ（水着） attacked マリナ, ホシノ, ヒビキ（応援団）, ハスミ（水着） with ミチル（ドレス）
+/// and イロハ, and lost.
+fn assert_the_defense(battle: &Battle, width: u32) {
+    assert!(!battle.attacker_won, "the defender won, at {width}");
+    let attack = team([
+        (10153, 722_844),
+        (10042, 76585),
+        (10006, 144_654),
+        (10037, 64881),
+        (20016, 496_008),
+        (20027, 10764),
+    ]);
+    let defense = team([
+        (10037, 91633),
+        (10005, 88761),
+        (16010, 585_640),
+        (10124, 433_802),
+        (20016, 615_109),
+        (20053, 0),
+    ]);
+    assert_eq!(battle.attacker.team, attack, "the attack, at {width}");
+    assert_eq!(battle.defender.team, defense, "the defense, at {width}");
+}
+
+/// Every window size reads a screen as `check` has it or does not read it, and the sizes
+/// of `READ` do read it.
+fn assert_at_other_sizes(screen: &RgbImage, check: fn(&Battle, u32)) {
+    let reader = Reader::new();
+    for width in WIDTHS {
+        let battle = reader.read(&drawn(screen, width));
+        if let Some(battle) = &battle {
+            check(battle, width);
+        }
+        assert!(
+            battle.is_some() || !READ.contains(&width),
+            "the record reads at {width}"
+        );
+    }
+}
+
 fn plate(party: &Party) -> Plate {
     party.plate.clone().expect("a name is drawn")
 }
@@ -105,17 +153,9 @@ fn the_record_is_read_as_the_screen_shows_it() {
 
 #[test]
 fn other_window_sizes_read_the_same_or_nothing() {
-    let reader = Reader::new();
-    for width in WIDTHS {
-        let battle = reader.read(&drawn(&fixture(), width));
-        if let Some(battle) = &battle {
-            assert_the_record(battle, width);
-        }
-        assert!(
-            battle.is_some() || !READ.contains(&width),
-            "the record reads at {width}"
-        );
-    }
+    assert_at_other_sizes(&fixture(), assert_the_record);
+    assert_at_other_sizes(&anonymous(), assert_the_anonymous_record);
+    assert_at_other_sizes(&defended(), assert_the_defense);
 }
 
 #[test]
@@ -149,15 +189,29 @@ fn an_anonymous_player_is_read_as_nobody() {
         plate(&battle.attacker).same(&plate(&named.attacker)),
         "the attacker of the other record"
     );
-    for width in WIDTHS {
-        let battle = reader.read(&drawn(&anonymous(), width));
-        if let Some(battle) = &battle {
-            assert_the_anonymous_record(battle, width);
-        }
+}
+
+#[test]
+fn a_defense_is_read_with_the_shield_on_the_left() {
+    let reader = Reader::new();
+    let battle = reader.read(&defended()).expect("the record reads");
+    assert_the_defense(&battle, 2370);
+    let named = reader.read(&fixture()).expect("the record reads");
+    assert!(
+        plate(&battle.defender).same(&plate(&named.attacker)),
+        "the defender attacked in the other record"
+    );
+    for known in [&named.attacker, &named.defender] {
         assert!(
-            battle.is_some() || !READ.contains(&width),
-            "the record reads at {width}"
+            !plate(&battle.attacker).same(&plate(known)),
+            "the attacker is a third player"
         );
+    }
+    // The right side's sword lies 4 short of where the left side's does: looked for at the
+    // left side's place, it was not known at these widths.
+    for width in [1560, 1806, 2208, 2340] {
+        let battle = reader.read(&drawn(&defended(), width));
+        assert_the_defense(&battle.expect("the record reads"), width);
     }
 }
 

@@ -63,8 +63,12 @@ const SIDE: f32 = 1179.0;
 type Area = (f32, f32, f32, f32);
 /// "戦闘履歴".
 const TITLE: Area = (1070.0, 190.0, 1300.0, 260.0);
-/// The sword of the attacker or the shield of the defender.
+/// The sword of the attacker or the shield of the defender. The right side's lies
+/// `ROLE_SHORT` short of `SIDE` to the right: on three screens the sword spanned 112 to 190
+/// on the left and 108 to 186 past `SIDE` on the right, the shield 120 to 182 and 116 to
+/// 179. Looked for a full `SIDE` to the right, the sword was 0.87 to 0.90 like itself.
 const ROLE: Area = (100.0, 335.0, 200.0, 435.0);
+const ROLE_SHORT: f32 = 4.0;
 /// "Win" or "Lose".
 const RESULT: Area = (215.0, 335.0, 440.0, 445.0);
 /// The middle of the player's picture: of an anonymous player's, the "?" in its circle.
@@ -241,7 +245,8 @@ pub fn title_shape(frame: &RgbImage) -> Option<GrayImage> {
 /// The shape of a side's role picture, for `make_refs` and the reader.
 pub fn role_shape(frame: &RgbImage, right: bool) -> Option<GrayImage> {
     let sheet = Sheet::of(frame)?;
-    Some(shape(&sheet.crop(ROLE, shift(right))?, blue, ROLE_SIZE))
+    let shift = if right { SIDE - ROLE_SHORT } else { 0.0 };
+    Some(shape(&sheet.crop(ROLE, shift)?, blue, ROLE_SIZE))
 }
 
 /// The shape of the middle of a side's player picture, for `make_refs` and the reader.
