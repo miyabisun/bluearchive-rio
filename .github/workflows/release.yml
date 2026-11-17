@@ -1,0 +1,68 @@
+name: Release
+
+# A release is built from its commit on main ("release: vX.Y.Z", pushed with its tag), not
+# from the tag, as Aoi's (bluearchive-aoi) is: the Rust cache a tag's run saves serves that
+# tag alone, so every release would build cold, while main's serves every later release.
+# Nothing is tested here: the pre-push gate (.githooks/pre-push) ran the checks.
+on:
+  push:
+    branches: [main]
+  # The first release (its tag stands on a commit that is no "release:" one), and a release
+  # whose run failed.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Fetching crates.io's index over HTTP/2 failed two of Aoi's releases ("Error in the HTTP2
+# framing layer"): one request at a time, retried.
+env:
+  CARGO_HTTP_MULTIPLEXING: false
+  CARGO_NET_RETRY: 10
+
+jobs:
+  publish:
+    if: "github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'release: v')"
+    runs-on: windows-latest
+    env:
+      ASSET: bluearchive-rio-x86_64-pc-windows-msvc.exe
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.96.0
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # The tag is pushed right after the commit; it must point at it.
+      - name: Check that the tag of Cargo.toml's version is this commit
+        id: tag
+        shell: pwsh
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          $tagged = git ls-remote origin "refs/tags/v$version"
+          if (-not ($tagged -and $tagged.StartsWith($env:GITHUB_SHA))) {
+            throw "tag v$version does not point at $env:GITHUB_SHA"
+          }
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build the app
+        run: cargo build --release --locked
+
+      - name: Package the exe and its SHA-256
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist-release | Out-Null
+          Copy-Item target\release\bluearchive-rio.exe "dist-release\$env:ASSET"
+          $hash = (Get-FileHash "dist-release\$env:ASSET" -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("$PWD\dist-release\$env:ASSET.sha256", "$hash  $env:ASSET`n")
+          Get-Content "dist-release\$env:ASSET.sha256"
+
+      - name: Publish the GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: gh release create $env:TAG "dist-release\$env:ASSET" "dist-release\$env:ASSET.sha256" --title $env:TAG --generate-notes --verify-tag

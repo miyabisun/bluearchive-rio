@@ -9,9 +9,9 @@ use std::sync::{
 use futures::channel::mpsc;
 use gpui::{Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext, px, size};
 
-use super::{Rio, theme::Theme};
+use super::{Rio, Updates, theme::Theme};
 use crate::{
-    app::{Core, Places, Snapshot},
+    app::{Core, Places, Snapshot, UpdateCheck},
     opponent::Front,
     settings::{Settings, ThemeChoice},
     store::{Counsel, Kept, Player, Seen, Tried},
@@ -60,6 +60,10 @@ fn set(core: &Core, vcx: &mut VisualTestContext, change: impl FnOnce(&mut Snapsh
 fn bounds(vcx: &mut VisualTestContext, selector: &str) -> Option<Bounds<Pixels>> {
     vcx.run_until_parked();
     vcx.debug_bounds(Box::leak(selector.to_owned().into_boxed_str()))
+}
+
+fn has(vcx: &mut VisualTestContext, selector: &str) -> bool {
+    bounds(vcx, selector).is_some()
 }
 
 /// Whether this text is on the screen.
@@ -268,4 +272,102 @@ fn the_theme_chosen_is_kept(cx: &mut TestAppContext) {
     // A tab closes the page.
     click(vcx, "tab:対戦");
     assert!(!shows(vcx, "テーマ"));
+}
+
+fn answering(rio: &Entity<Rio>, vcx: &mut VisualTestContext, updates: Updates) {
+    rio.update(vcx, |rio, _| rio.updates = updates);
+}
+
+/// How often the app was started again as the version taken.
+static RESTARTS: AtomicUsize = AtomicUsize::new(0);
+
+#[gpui::test]
+fn the_settings_check_for_an_update_and_take_it(cx: &mut TestAppContext) {
+    let (rio, _core, vcx) = open(cx);
+    fn found(latest: Option<&str>) -> UpdateCheck {
+        UpdateCheck {
+            current: "v0.1.0".to_owned(),
+            latest: latest.map(str::to_owned),
+        }
+    }
+    answering(
+        &rio,
+        vcx,
+        Updates {
+            check: || Ok(found(None)),
+            ..Updates::default()
+        },
+    );
+    click(vcx, "settings-button");
+    let (check, theme) = (
+        bounds(vcx, "check").expect("the button to check"),
+        bounds(vcx, "choice-theme-ライト").expect("the theme's choices"),
+    );
+    assert!(check.top() < theme.top(), "the update is the page's first");
+    click(vcx, "check");
+    assert!(
+        shows(vcx, "最新のバージョンです（v0.1.0）"),
+        "up to date, a toast says so"
+    );
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_secs(4));
+    vcx.run_until_parked();
+    assert!(!shows(vcx, "最新のバージョンです（v0.1.0）"), "and goes");
+
+    answering(
+        &rio,
+        vcx,
+        Updates {
+            check: || Ok(found(Some("v0.1.1"))),
+            apply: || Err("書き込めませんでした".to_owned()),
+            restart: || {},
+        },
+    );
+    click(vcx, "check");
+    assert!(
+        shows(vcx, "v0.1.1 があります（今 v0.1.0）"),
+        "a newer version stays in the page"
+    );
+    click(vcx, "tab:履歴");
+    assert!(has(vcx, "install"), "over a tab too, with the button");
+    click(vcx, "install");
+    assert!(
+        shows(vcx, "アップデートできませんでした: 書き込めませんでした"),
+        "a failure says why"
+    );
+    assert!(!has(vcx, "install"));
+
+    answering(
+        &rio,
+        vcx,
+        Updates {
+            check: || Ok(found(Some("v0.1.1"))),
+            apply: || Ok(()),
+            restart: || {
+                RESTARTS.fetch_add(1, Ordering::Relaxed);
+            },
+        },
+    );
+    click(vcx, "settings-button");
+    click(vcx, "check");
+    click(vcx, "install");
+    assert_eq!(
+        RESTARTS.load(Ordering::Relaxed),
+        1,
+        "taken, the app starts again as it"
+    );
+
+    answering(
+        &rio,
+        vcx,
+        Updates {
+            check: || Err("通信できませんでした".to_owned()),
+            ..Updates::default()
+        },
+    );
+    click(vcx, "check");
+    assert!(
+        shows(vcx, "アップデートできませんでした: 通信できませんでした"),
+        "a check that fails says why"
+    );
 }

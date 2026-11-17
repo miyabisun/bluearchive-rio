@@ -1,5 +1,6 @@
 //! The parts the tabs share, as Aoi's: text the tests can find, hover tooltips, the settings
-//! page's choices, a failure's banner and what a tab says while it is empty.
+//! page's choices and buttons, notices, a failure's banner and what a tab says while it is
+//! empty.
 
 use gpui::{
     AnyView, App, AppContext as _, Div, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -109,6 +110,50 @@ pub fn quiet(theme: &Theme, message: impl Into<SharedString>) -> Div {
         .text_size(FS_SM)
         .text_color(theme.muted)
         .child(text(message))
+}
+
+/// A quiet notice over the page, found by its id.
+pub fn notice(theme: &Theme, id: &str, message: impl Into<SharedString>) -> Stateful<Div> {
+    let message = message.into();
+    let selector = id.to_owned();
+    div()
+        .id(SharedString::from(id.to_owned()))
+        .debug_selector(move || selector.clone())
+        .role(Role::Status)
+        .aria_label(message.clone())
+        .flex_none()
+        .mb(px(16.))
+        .text_size(FS_SM)
+        .text_color(theme.muted)
+        .child(text(message))
+}
+
+/// A button drawn by its outline: the accent's for the page's main action.
+pub fn outlined_button(theme: &Theme, id: &str, label: &str, primary: bool) -> Stateful<Div> {
+    let (border, color) = if primary {
+        (theme.accent, theme.accent)
+    } else {
+        (theme.border, theme.on_surface)
+    };
+    let focused = if primary { theme.accent } else { theme.muted };
+    let selector = id.to_owned();
+    div()
+        .id(SharedString::from(id.to_owned()))
+        .debug_selector(move || selector.clone())
+        .role(Role::Button)
+        .aria_label(label.to_owned())
+        .tab_stop(true)
+        .flex_none()
+        .px(SP_3)
+        .py(px(2.))
+        .border_1()
+        .border_color(border)
+        .rounded(RADIUS_SM)
+        .text_size(FS_SM)
+        .text_color(color)
+        .cursor_pointer()
+        .focus(move |s| s.border_color(focused))
+        .child(label.to_owned())
 }
 
 /// What a tab says before there is anything to show in it.

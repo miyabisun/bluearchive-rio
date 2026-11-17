@@ -83,6 +83,29 @@ pub fn kept_at(seen_at: &str) -> &str {
     seen_at.get(5..16).unwrap_or(seen_at)
 }
 
+/// Where checking for an update and taking it stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateState {
+    Checking,
+    Latest { current: String },
+    Available { current: String, latest: String },
+    Installing { latest: String },
+    Failed { error: String },
+}
+
+/// Where checking for an update and taking it stands, as the window tells it (Aoi's words).
+pub fn update_text(update: &UpdateState) -> String {
+    match update {
+        UpdateState::Checking => "アップデートを確認しています…".to_owned(),
+        UpdateState::Latest { current } => format!("最新のバージョンです（{current}）"),
+        UpdateState::Available { current, latest } => {
+            format!("{latest} があります（今 {current}）")
+        }
+        UpdateState::Installing { latest } => format!("{latest} に更新しています…"),
+        UpdateState::Failed { error } => format!("アップデートできませんでした: {error}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Tone, expected_from, fared, kept_at, status_view};

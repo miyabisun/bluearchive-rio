@@ -30,10 +30,10 @@ use gpui::{
 };
 
 use crate::{
-    app::{Core, Places, Snapshot, VERSION},
+    app::{Core, Places, Snapshot, UpdateCheck, VERSION},
     settings::{Placement, Settings, ThemeChoice},
     store::{Kept, Player},
-    view,
+    view::{self, UpdateState},
     watch::Status,
 };
 
@@ -52,6 +52,8 @@ const WINDOW_LEAST: (f32, f32) = (420., 360.);
 /// How long the window's place has to stay put before it is kept: a drag moves it many times
 /// a second.
 const PLACE_SETTLES: Duration = Duration::from_millis(500);
+/// How long a toast stays before it goes.
+const TOAST_STAYS: Duration = Duration::from_secs(3);
 
 /// The sides of a student's icon: in the match tab's teams (at most and at least: a team
 /// stays on one row, its icons as large as the window lets them), in its list of other
@@ -110,8 +112,29 @@ enum Shown {
     Drawn(Arc<gpui::Image>, f32, i64),
 }
 
+/// How the window asks for the latest release and takes it: GitHub's in the app, a test's own
+/// in the tests.
+#[derive(Clone, Copy)]
+pub struct Updates {
+    pub check: fn() -> Result<UpdateCheck, String>,
+    pub apply: fn() -> Result<(), String>,
+    /// Starts the app again, as the version taken.
+    pub restart: fn(),
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self {
+            check: crate::app::check_update,
+            apply: crate::app::apply_update,
+            restart: || crate::app::restart(),
+        }
+    }
+}
+
 pub struct Rio {
     core: Arc<Core>,
+    updates: Updates,
     /// The snapshot shown, taken from `core` on every change.
     shown: Snapshot,
     settings: Settings,
@@ -128,6 +151,11 @@ pub struct Rio {
     content: ScrollHandle,
     /// Keeps the window's place once it stops moving (see `PLACE_SETTLES`).
     keeping_place: Option<Task<()>>,
+    /// Where an update stands while it stays in the page: a newer version, taking it, a
+    /// failure (checking and up to date are toasts).
+    update: Option<UpdateState>,
+    toast: Option<SharedString>,
+    toast_timer: Option<Task<()>>,
     _changes: Task<()>,
 }
 
@@ -163,6 +191,7 @@ impl Rio {
             .collect();
         Self {
             core,
+            updates: Updates::default(),
             shown,
             settings,
             tab: Tab::Match,
@@ -172,6 +201,9 @@ impl Rio {
             plates: HashMap::new(),
             content: ScrollHandle::new(),
             keeping_place: None,
+            update: None,
+            toast: None,
+            toast_timer: None,
             _changes: changes,
         }
     }
@@ -213,6 +245,96 @@ impl Rio {
                 let _ = this.update(cx, |this, _| this.keep_settings());
             },
         ));
+    }
+
+    /// Shows `text` as a toast, gone after a while unless it `stays`.
+    fn notify_toast(&mut self, text: Option<&str>, stays: bool, cx: &mut Context<Self>) {
+        self.toast = text.map(|t| SharedString::from(t.to_owned()));
+        self.toast_timer = None;
+        if text.is_some() && !stays {
+            self.toast_timer = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(TOAST_STAYS).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.toast = None;
+                    cx.notify();
+                });
+            }));
+        }
+        cx.notify();
+    }
+
+    /// Checks for an update: while checking and when up to date, a toast says so; a newer
+    /// version (with the button to take it) and a failure stay in the page.
+    fn check_update(&mut self, cx: &mut Context<Self>) {
+        self.update = None;
+        self.notify_toast(Some(&view::update_text(&UpdateState::Checking)), true, cx);
+        let check = self.updates.check;
+        let found = cx.background_executor().spawn(async move { check() });
+        cx.spawn(async move |this, cx| {
+            let found = found.await;
+            let _ = this.update(cx, |this, cx| match found {
+                Ok(UpdateCheck {
+                    current,
+                    latest: Some(latest),
+                }) => {
+                    this.notify_toast(None, false, cx);
+                    this.update = Some(UpdateState::Available { current, latest });
+                }
+                Ok(UpdateCheck { current, .. }) => {
+                    let text = view::update_text(&UpdateState::Latest { current });
+                    this.notify_toast(Some(&text), false, cx);
+                }
+                Err(error) => {
+                    this.notify_toast(None, false, cx);
+                    this.update = Some(UpdateState::Failed { error });
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Takes the update found; on success the app starts again as it.
+    fn install(&mut self, cx: &mut Context<Self>) {
+        let Some(UpdateState::Available { latest, .. }) = self.update.clone() else {
+            return;
+        };
+        self.update = Some(UpdateState::Installing { latest });
+        cx.notify();
+        let apply = self.updates.apply;
+        let applied = cx.background_executor().spawn(async move { apply() });
+        cx.spawn(async move |this, cx| {
+            let applied = applied.await;
+            let _ = this.update(cx, |this, cx| match applied {
+                Ok(()) => (this.updates.restart)(),
+                Err(error) => {
+                    this.update = Some(UpdateState::Failed { error });
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Where the update stands, over the page: a newer version with the button to take it,
+    /// taking it, or why it failed.
+    fn update_notice(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let update = self.update.as_ref()?;
+        let told = view::update_text(update);
+        Some(match update {
+            UpdateState::Failed { .. } => {
+                widgets::error(theme, "update-error", told).into_any_element()
+            }
+            UpdateState::Available { .. } => widgets::notice(theme, "update", told)
+                .flex()
+                .items_center()
+                .child(
+                    widgets::outlined_button(theme, "install", "更新して再起動", true)
+                        .ml(SP_3)
+                        .on_click(cx.listener(|this, _, _, cx| this.install(cx))),
+                )
+                .into_any_element(),
+            _ => widgets::notice(theme, "update", told).into_any_element(),
+        })
     }
 
     /// A name as the game draws it (a plate's PNG: its ink bright on black) as a picture in
@@ -548,8 +670,20 @@ impl Rio {
         .into_any_element()
     }
 
-    /// The settings, in the tabs' place: the theme, where the records are kept, the version.
+    /// The settings, in the tabs' place: the update first (as in Aoi), the theme, where the
+    /// records are kept.
     fn settings_page(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let update = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(SP_3)
+            .mb(SP_4)
+            .child(
+                widgets::outlined_button(theme, "check", "アップデートを確認", false)
+                    .on_click(cx.listener(|this, _, _, cx| this.check_update(cx))),
+            )
+            .child(widgets::quiet(theme, format!("今のバージョン v{VERSION}")));
         let themes = ThemeChoice::ALL.into_iter().map(|(choice, name)| {
             widgets::choice(
                 theme,
@@ -565,12 +699,12 @@ impl Rio {
         });
         let records = self.core.places.database.display().to_string();
         scroll("settings", &self.content)
+            .child(group(theme, "アップデート", None))
+            .child(update)
             .child(group(theme, "テーマ", None))
             .child(div().flex().flex_wrap().gap(SP_1).mb(SP_4).children(themes))
             .child(group(theme, "記録の保存先", None))
-            .child(widgets::quiet(theme, records).mb(SP_4))
-            .child(group(theme, "バージョン", None))
-            .child(widgets::quiet(theme, format!("Rio v{VERSION}")))
+            .child(widgets::quiet(theme, records))
             .into_any_element()
     }
 }
@@ -845,6 +979,7 @@ impl Render for Rio {
             Status::Failed(message) => Some(widgets::error(&theme, "read-error", message.clone())),
             _ => None,
         };
+        let update = self.update_notice(&theme, cx);
         let content = if self.settings_open {
             self.settings_page(&theme, cx)
         } else {
@@ -863,6 +998,7 @@ impl Render for Rio {
                 this.settings_open = false;
                 cx.notify();
             }))
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -889,6 +1025,7 @@ impl Render for Rio {
                     .pt(SP_4)
                     .px(SP_3)
                     .children(failure)
+                    .children(update)
                     // The tab's pictures are kept while it shows, and dropped as another opens.
                     .child(
                         gpui::image_cache(gpui::retain_all(SharedString::from(format!(
@@ -902,6 +1039,31 @@ impl Render for Rio {
                         .child(content),
                     ),
             )
+            .when_some(self.toast.clone(), |root, toast| {
+                root.child(
+                    div()
+                        .absolute()
+                        .left(SP_4)
+                        .right(SP_4)
+                        .bottom(SP_4)
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .id("toast")
+                                .role(gpui::Role::Status)
+                                .aria_label(toast.clone())
+                                .px(SP_4)
+                                .py(SP_2)
+                                .border_1()
+                                .border_color(theme.border)
+                                .rounded(RADIUS_SM)
+                                .bg(theme.surface)
+                                .text_size(FS_SM)
+                                .child(text(toast)),
+                        ),
+                )
+            })
     }
 }
 

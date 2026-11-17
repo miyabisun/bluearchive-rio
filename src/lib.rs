@@ -19,6 +19,7 @@ pub mod overlay;
 pub mod settings;
 pub mod store;
 pub mod ui;
+pub mod update;
 pub mod view;
 pub mod watch;
 

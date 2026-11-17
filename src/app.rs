@@ -14,6 +14,7 @@ use futures::channel::mpsc::UnboundedSender;
 
 use crate::{
     store::Kept,
+    update,
     watch::{self, Opponent, Status, Update},
 };
 
@@ -73,6 +74,41 @@ pub fn places() -> Result<Places, String> {
         database: dir.join("rio.db"),
         settings: dir.join("settings.json"),
     })
+}
+
+/// The app's version and the newer one the latest release brings, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateCheck {
+    pub current: String,
+    pub latest: Option<String>,
+}
+
+/// Asks GitHub for the latest release (see `update`); blocks on the network.
+pub fn check_update() -> Result<UpdateCheck, String> {
+    let tag = update::latest()?;
+    Ok(UpdateCheck {
+        current: format!("v{VERSION}"),
+        latest: update::update_of(&tag, VERSION).map(|u| u.version),
+    })
+}
+
+/// Puts the latest release in place of the running exe; blocks on the network. The caller
+/// starts the new exe and ends this one.
+pub fn apply_update() -> Result<(), String> {
+    let tag = update::latest()?;
+    let update = update::update_of(&tag, VERSION).ok_or("最新のバージョンです")?;
+    update::install(&update)
+}
+
+/// Starts the exe now in place (the new version) and ends this one at once, as Aoi does:
+/// asked to quit through its event loop instead, Aoi's old version once kept its window open
+/// beside the new one (2026-11-07). The battles are in SQLite and the settings are written
+/// whole or not at all, so nothing is left half kept.
+pub fn restart() -> ! {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).spawn();
+    }
+    std::process::exit(0);
 }
 
 /// What the window works with: the snapshot the reading keeps current. Every change is
@@ -138,6 +174,7 @@ impl Core {
 
 /// Runs the app: reads the game, and shows what it finds in the window.
 pub fn run() {
+    update::clean_up();
     let places = places().expect("the app's folder is known");
     crate::ui::run(places);
 }
