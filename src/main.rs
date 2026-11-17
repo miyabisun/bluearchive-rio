@@ -1,7 +1,8 @@
 //! Rio's command line.
-//!   bluearchive-rio                       watches the game and keeps the battle records shown
+//!   bluearchive-rio                       watches the game: keeps the battle records shown,
+//!                                         and marks over it what the records counsel
 //!   bluearchive-rio read <png>...         keeps the records of screenshots
-//!   bluearchive-rio predict <png>...      the defenses seen behind a screenshot's opponent
+//!   bluearchive-rio predict <png>...      what the records counsel against a screenshot's opponent
 //!   bluearchive-rio list                  the battles kept, the latest first
 //!   bluearchive-rio name <player> <name>  names a player
 //!   bluearchive-rio roster                the students held, as Aoi wrote them
@@ -11,15 +12,15 @@ use std::{collections::HashMap, error::Error, ops::Range, path::PathBuf};
 use bluearchive_rio::{
     aoi,
     history::Reader,
-    opponent::Front,
-    store::{Kept, Player, Seen, Store},
+    opponent::{self, Front},
+    store::{Counsel, Kept, Player, Store},
     students,
 };
 
 const USAGE: &str = "使い方:
-  bluearchive-rio                         ゲームを見て、表示された戦闘履歴を登録する
+  bluearchive-rio                         ゲームを見て、戦闘履歴を登録し、編成をゲームの上に案内する
   bluearchive-rio read <png>...           スクリーンショットの戦闘履歴を登録する
-  bluearchive-rio predict <png>...        スクリーンショットの対戦相手の、防衛の編成を予測する
+  bluearchive-rio predict <png>...        スクリーンショットの対戦相手の、防衛の予測とおすすめの攻撃
   bluearchive-rio list                    登録した戦闘を新しい順に表示する
   bluearchive-rio name <プレイヤー番号> <名前>  プレイヤーに名前を付ける
   bluearchive-rio roster                  Aoi が書き出した手持ちの生徒を表示する";
@@ -37,8 +38,26 @@ fn database() -> Result<PathBuf, Box<dyn Error>> {
     Ok(dir.join("rio.db"))
 }
 
-/// A battle as the list shows it: the result, then each side's team in the players' terms
-/// (A1 to A4 and D1 to D4 the strikers from the left, SP the specials).
+/// A team in the players' terms: A1 to A4 or D1 to D4 the strikers from the left, SP the
+/// specials.
+fn team(team: &[i64; 6], side: char, names: &HashMap<i64, String>) -> String {
+    let student = |slot: usize| {
+        let place = if slot < 4 {
+            format!("{side}{}", slot + 1)
+        } else {
+            "SP".to_owned()
+        };
+        let name = names
+            .get(&team[slot])
+            .cloned()
+            .unwrap_or_else(|| format!("生徒#{}", team[slot]));
+        format!("{place} {name}")
+    };
+    let of = |slots: Range<usize>| slots.map(student).collect::<Vec<_>>().join(" / ");
+    format!("{} | {}", of(0..4), of(4..6))
+}
+
+/// A battle as the list shows it: the result, then each side's team.
 fn describe(battle: &Kept, names: &HashMap<i64, String>) -> String {
     let player = |player: &Option<Player>| match player {
         None => "匿名".to_owned(),
@@ -48,22 +67,7 @@ fn describe(battle: &Kept, names: &HashMap<i64, String>) -> String {
         }) => format!("{name}(#{id})"),
         Some(Player { id, name: None }) => format!("プレイヤー#{id}"),
     };
-    let team = |team: &[i64; 6], side: char| {
-        let student = |slot: usize| {
-            let place = if slot < 4 {
-                format!("{side}{}", slot + 1)
-            } else {
-                "SP".to_owned()
-            };
-            let name = names
-                .get(&team[slot])
-                .cloned()
-                .unwrap_or_else(|| format!("生徒#{}", team[slot]));
-            format!("{place} {name}")
-        };
-        let of = |slots: Range<usize>| slots.map(student).collect::<Vec<_>>().join(" / ");
-        format!("{} | {}", of(0..4), of(4..6))
-    };
+    let team = |students: &[i64; 6], side: char| team(students, side, names);
     format!(
         "#{} {} {}\n  攻撃 {}: {}\n  防衛 {}: {}",
         battle.id,
@@ -80,14 +84,19 @@ fn describe(battle: &Kept, names: &HashMap<i64, String>) -> String {
     )
 }
 
-/// What the records tell of the defense behind an opponent's front: the strikers seen
-/// behind the same first striker and specials, the most seen first.
-fn foretell(front: &Front, seen: &[Seen], names: &HashMap<i64, String>) -> String {
+/// What the records counsel against an opponent's front: the opponent's own last defense
+/// behind it, the strikers seen behind the same first striker and specials (the most seen
+/// first), and the attack that won most against the defense expected.
+fn foretell(front: &Front, counsel: &Counsel, names: &HashMap<i64, String>) -> String {
     let name = |student: &i64| {
         names
             .get(student)
             .cloned()
             .unwrap_or_else(|| format!("生徒#{student}"))
+    };
+    let behind = |rest: &[i64; 3]| {
+        let [second, third, fourth] = rest.each_ref().map(name);
+        format!("D2 {second} / D3 {third} / D4 {fourth}")
     };
     let mut told = format!(
         "対戦相手の防衛: D1 {} | SP {} / SP {}",
@@ -95,17 +104,56 @@ fn foretell(front: &Front, seen: &[Seen], names: &HashMap<i64, String>) -> Strin
         name(&front.specials[0]),
         name(&front.specials[1])
     );
-    if seen.is_empty() {
+    if let Some(last) = &counsel.last {
+        told.push_str(&format!("\n  この相手の最後の防衛: {}", behind(last)));
+    }
+    if counsel.seen.is_empty() {
         told.push_str("\n  同じ D1 とスペシャルの防衛は、まだ登録がありません");
     }
-    for defense in seen {
-        let [second, third, fourth] = defense.rest.each_ref().map(name);
+    for defense in &counsel.seen {
         told.push_str(&format!(
-            "\n  {}回 D2 {second} / D3 {third} / D4 {fourth} (最後に登録 {})",
-            defense.battles, defense.last_seen
+            "\n  {}回 {} (最後に登録 {})",
+            defense.battles,
+            behind(&defense.rest),
+            defense.last_seen
         ));
     }
+    match (&counsel.attack, counsel.behind()) {
+        (Some(tried), _) => told.push_str(&format!(
+            "\n  おすすめの攻撃 ({}戦{}勝): {}",
+            tried.battles,
+            tried.wins,
+            team(&tried.attack, 'A', names)
+        )),
+        (None, Some(rest)) => told.push_str(&format!(
+            "\n  {} の防衛に勝った攻撃は、まだ登録がありません",
+            behind(&rest)
+        )),
+        (None, None) => {}
+    }
     told
+}
+
+/// The students held, as Aoi wrote them; `None` (with the reason told) when its file does
+/// not read: the counsel then takes any team, held or not.
+fn held() -> Option<Vec<aoi::Held>> {
+    let read = || -> Result<Vec<aoi::Held>, Box<dyn Error>> {
+        let path = aoi::latest().ok_or("ドキュメントのフォルダが分かりません")?;
+        let yaml = std::fs::read_to_string(&path)
+            .map_err(|error| format!("{} を読めません: {error}", path.display()))?;
+        Ok(aoi::roster(&yaml)?)
+    };
+    read()
+        .inspect_err(|error| {
+            eprintln!("Aoi の名簿を読めないので、手持ちにない生徒を含む攻撃も案内します ({error})");
+        })
+        .ok()
+}
+
+/// The ids of the students held.
+fn ids(held: &Option<Vec<aoi::Held>>) -> Option<Vec<i64>> {
+    let held = held.as_ref()?;
+    Some(held.iter().filter_map(|student| student.id).collect())
 }
 
 fn names() -> HashMap<i64, String> {
@@ -141,12 +189,15 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         ["predict", paths @ ..] if !paths.is_empty() => {
             let (reader, store, names) = (Reader::new(), Store::open(&database()?)?, names());
+            let held = ids(&held());
             for path in paths {
-                match reader.front(&image::open(path)?.to_rgb8()) {
+                let screen = image::open(path)?.to_rgb8();
+                match reader.front(&screen) {
                     None => println!("{path}: 対戦相手の画面を読めませんでした"),
                     Some(front) => {
-                        let seen = store.defenses(front.first, front.specials)?;
-                        println!("{path}: {}", foretell(&front, &seen, &names));
+                        let name = opponent::name(&screen);
+                        let counsel = store.counsel(&front, name.as_ref(), held.as_deref())?;
+                        println!("{path}: {}", foretell(&front, &counsel, &names));
                     }
                 }
             }
@@ -189,35 +240,117 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 }
 
-/// Watches the game's window and keeps every battle record that stands still on it.
+/// Watches the game's window: keeps every battle record that stands still on it, and marks
+/// over the opponent's dialog and the formation dialog what the records counsel.
 #[cfg(windows)]
 fn watch() -> Result<(), Box<dyn Error>> {
-    use bluearchive_rio::{capture, history::Steady};
+    use std::{
+        sync::mpsc::RecvTimeoutError,
+        time::{Duration, Instant},
+    };
+
+    use bluearchive_rio::{
+        capture,
+        guide::{self, Rank, Visit},
+        history::{Plate, Steady},
+        overlay::Overlay,
+    };
 
     let (reader, store, names) = (Reader::new(), Store::open(&database()?)?, names());
-    let (mut steady, mut fronts) = (Steady::new(), Steady::new());
+    let held = held();
+    let roster = ids(&held);
+    let ranks: HashMap<i64, Rank> = held
+        .iter()
+        .flatten()
+        .filter_map(|student| {
+            let rank = Rank {
+                level: student.level?,
+                rarity: student.rarity?,
+                bond: student.bond?,
+            };
+            Some((student.id?, rank))
+        })
+        .collect();
+    let mut overlay = Overlay::new();
+    if overlay.is_none() {
+        eprintln!("ゲームの上に重ねるウィンドウを作れませんでした。案内は文字だけで出します。");
+    }
+    let (mut steady, mut told, mut visit) = (Steady::new(), Steady::new(), Visit::default());
+    // The opponent whose dialog was open last: the formation dialog shows the front again,
+    // without the name.
+    let mut met: Option<(Front, Option<Plate>)> = None;
+    let mut counselled: Option<((Front, Option<Plate>), Counsel)> = None;
     println!(
-        "戦闘履歴を開くと登録し、対戦相手を選ぶと防衛の編成を予測します。終わるときは Ctrl+C を押してください。"
+        "戦闘履歴を開くと登録し、対戦相手を選ぶと防衛の編成を予測して、編成の画面で選ぶ生徒を案内します。終わるときは Ctrl+C を押してください。"
     );
-    for frame in capture::frames(|message| println!("{message}")) {
-        let now = std::time::Instant::now();
-        if let Some(front) = fronts.see(reader.front(&frame), now) {
-            let seen = store.defenses(front.first, front.specials)?;
-            println!("{}", foretell(front, &seen, &names));
+    let frames = capture::frames(|message| println!("{message}"));
+    loop {
+        if let Some(overlay) = &overlay {
+            overlay.pump();
         }
-        let Some(battle) = steady.see(reader.read(&frame), now) else {
-            continue;
-        };
-        if store.save(battle)? {
-            // The battle just kept is the latest.
-            if let Some(kept) = store.battles()?.first() {
-                println!("登録しました\n{}", describe(kept, &names));
+        let shot = match frames.recv_timeout(Duration::from_secs(1)) {
+            Ok(shot) => shot,
+            // The game's window is gone or hidden: nothing to lie over.
+            Err(RecvTimeoutError::Timeout) => {
+                if let Some(overlay) = &mut overlay {
+                    overlay.hide();
+                }
+                continue;
             }
-        } else {
-            println!("登録済みの戦闘です");
+            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+        };
+        let (frame, now) = (&shot.image, Instant::now());
+        if let Some(battle) = steady.see(reader.read(frame), now) {
+            if store.save(battle)? {
+                // The battle just kept is the latest; what was counselled may change with it.
+                counselled = None;
+                if let Some(kept) = store.battles()?.first() {
+                    println!("登録しました\n{}", describe(kept, &names));
+                }
+            } else {
+                println!("登録済みの戦闘です");
+            }
+        }
+
+        let (dialog, forming) = (reader.front(frame), reader.formation(frame));
+        if let Some(front) = dialog {
+            met = Some((front, opponent::name(frame)));
+        }
+        let mut marks = Vec::new();
+        let front = dialog.or(forming.as_ref().map(|shown| shown.front));
+        let opponent = front.map(|front| {
+            let name = met.as_ref().filter(|(met, _)| *met == front);
+            (front, name.and_then(|(_, name)| name.clone()))
+        });
+        if let Some(opponent) = &opponent {
+            if counselled.as_ref().is_none_or(|(of, _)| of != opponent) {
+                let (front, name) = opponent;
+                let counsel = store.counsel(front, name.as_ref(), roster.as_deref())?;
+                counselled = Some((opponent.clone(), counsel));
+            }
+            if let Some((_, counsel)) = &counselled {
+                marks = match &forming {
+                    Some(shown) => guide::for_formation(
+                        shown,
+                        counsel.behind(),
+                        counsel.attack.as_ref().map(|tried| tried.attack),
+                        visit.enter(&shown.placed, now),
+                        &ranks,
+                    ),
+                    None => counsel.behind().map_or_else(Vec::new, guide::for_opponent),
+                };
+            }
+        }
+        if let (Some((front, _)), Some((_, counsel))) = (told.see(opponent, now), &counselled) {
+            println!("{}", foretell(front, counsel, &names));
+        }
+        if let Some(overlay) = &mut overlay {
+            match shot.origin {
+                Some(origin) if shot.in_front => overlay.show(&marks, origin, frame.dimensions()),
+                _ => overlay.hide(),
+            }
         }
     }
-    Ok(())
 }
 
 #[cfg(not(windows))]
@@ -231,7 +364,7 @@ mod tests {
 
     use bluearchive_rio::{
         opponent::Front,
-        store::{Kept, Player, Seen},
+        store::{Counsel, Kept, Player, Seen, Tried},
     };
 
     use super::{describe, foretell};
@@ -271,14 +404,40 @@ mod tests {
                 last_seen: "2026-11-16 21:00:00".to_owned(),
             },
         ];
+        let mut counsel = Counsel {
+            seen: seen.to_vec(),
+            last: None,
+            attack: None,
+        };
         assert_eq!(
-            foretell(&front, &seen, &names()),
+            foretell(&front, &counsel, &names()),
             "対戦相手の防衛: D1 アツコ | SP イロハ / SP ミチル（ドレス）
   2回 D2 マリナ / D3 トキ / D4 イオリ (最後に登録 2026-11-17 13:14:04)
-  1回 D2 マリナ / D3 イオリ / D4 生徒#99 (最後に登録 2026-11-16 21:00:00)"
+  1回 D2 マリナ / D3 イオリ / D4 生徒#99 (最後に登録 2026-11-16 21:00:00)
+  D2 マリナ / D3 トキ / D4 イオリ の防衛に勝った攻撃は、まだ登録がありません"
         );
+        // The opponent's own last defense is the one expected, and an attack won against it.
+        counsel.last = Some([2, 9, 99]);
+        counsel.attack = Some(Tried {
+            attack: [1, 2, 3, 4, 5, 6],
+            wins: 2,
+            battles: 3,
+        });
         assert_eq!(
-            foretell(&front, &[], &names()),
+            foretell(&front, &counsel, &names()),
+            "対戦相手の防衛: D1 アツコ | SP イロハ / SP ミチル（ドレス）
+  この相手の最後の防衛: D2 マリナ / D3 イオリ / D4 生徒#99
+  2回 D2 マリナ / D3 トキ / D4 イオリ (最後に登録 2026-11-17 13:14:04)
+  1回 D2 マリナ / D3 イオリ / D4 生徒#99 (最後に登録 2026-11-16 21:00:00)
+  おすすめの攻撃 (3戦2勝): A1 ホシノ / A2 マリナ / A3 ヒビキ（応援団） / A4 ハスミ（水着） | SP イロハ / SP ミチル（ドレス）"
+        );
+        let none = Counsel {
+            seen: Vec::new(),
+            last: None,
+            attack: None,
+        };
+        assert_eq!(
+            foretell(&front, &none, &names()),
             "対戦相手の防衛: D1 アツコ | SP イロハ / SP ミチル（ドレス）
   同じ D1 とスペシャルの防衛は、まだ登録がありません"
         );

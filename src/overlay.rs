@@ -1,0 +1,432 @@
+//! The marks of `guide` drawn over the game: a picture as large as the game's screen
+//! (`draw`), shown in a window that lies over the game's and lets every click through to
+//! it (`Overlay`, on Windows). The game is only covered: nothing is sent to it.
+
+use image::{
+    Rgba, RgbaImage,
+    imageops::{self, FilterType},
+};
+
+use crate::{
+    guide::{Mark, SEEK_SIDE, Way},
+    history::{Area, scale, spot},
+};
+
+/// A card to pick, a card to take out and a student expected: the game marks its own
+/// choice in yellow green, and none of these is near it.
+const PICK: Rgba<u8> = Rgba([255, 0, 160, 255]);
+const DROP: Rgba<u8> = Rgba([235, 30, 45, 255]);
+const GUESS: Rgba<u8> = Rgba([255, 205, 0, 255]);
+/// Over a card to take out, and behind an icon.
+const VEIL: Rgba<u8> = Rgba([0, 0, 0, 140]);
+const GROUND: Rgba<u8> = Rgba([24, 28, 44, 235]);
+const ARROW: Rgba<u8> = Rgba([255, 255, 255, 255]);
+/// How thick a frame is, and how an arrow is drawn beside a sought student's icon: its
+/// gap to the icon, its height and its width. On the measured screen.
+const FRAME: f32 = 8.0;
+const ARROW_GAP: f32 = 6.0;
+const ARROW_TALL: f32 = 30.0;
+const ARROW_WIDE: f32 = 56.0;
+
+struct Canvas {
+    picture: RgbaImage,
+    scale: f32,
+}
+
+impl Canvas {
+    /// The picture's pixels of an area of the measured screen: left, top, right, bottom.
+    fn pixels(&self, (left, top, right, bottom): Area) -> (u32, u32, u32, u32) {
+        let size = self.picture.dimensions();
+        let ((x0, y0), (x1, y1)) = (
+            spot(size, self.scale, (left, top)),
+            spot(size, self.scale, (right, bottom)),
+        );
+        let within = |at: f32, most: u32| (at.round().max(0.0) as u32).min(most);
+        (
+            within(x0, size.0),
+            within(y0, size.1),
+            within(x1, size.0),
+            within(y1, size.1),
+        )
+    }
+
+    fn fill(&mut self, area: Area, colour: Rgba<u8>) {
+        let (x0, y0, x1, y1) = self.pixels(area);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                self.picture.put_pixel(x, y, colour);
+            }
+        }
+    }
+
+    /// The edge of an area, `FRAME` thick inside it.
+    fn frame(&mut self, (left, top, right, bottom): Area, colour: Rgba<u8>) {
+        self.fill((left, top, right, top + FRAME), colour);
+        self.fill((left, bottom - FRAME, right, bottom), colour);
+        self.fill((left, top, left + FRAME, bottom), colour);
+        self.fill((right - FRAME, top, right, bottom), colour);
+    }
+
+    /// A student's icon in the square of `side` about `middle`, on a dark ground.
+    fn icon(&mut self, student: i64, middle: (f32, f32), side: f32) -> Area {
+        let half = side / 2.0;
+        let square = (
+            middle.0 - half,
+            middle.1 - half,
+            middle.0 + half,
+            middle.1 + half,
+        );
+        self.fill(square, GROUND);
+        let (x0, y0, x1, y1) = self.pixels(square);
+        let icon = crate::icon(student).and_then(|icon| image::load_from_memory(icon).ok());
+        if let (Some(icon), true) = (icon, x1 > x0 && y1 > y0) {
+            let icon = imageops::resize(&icon.to_rgba8(), x1 - x0, y1 - y0, FilterType::Triangle);
+            imageops::overlay(&mut self.picture, &icon, i64::from(x0), i64::from(y0));
+        }
+        square
+    }
+
+    /// An arrow's head with its tip at `tip`, pointing up or down.
+    fn arrow(&mut self, tip: (f32, f32), up: bool) {
+        let size = self.picture.dimensions();
+        let (x, y) = spot(size, self.scale, tip);
+        let (tall, wide) = (ARROW_TALL * self.scale, ARROW_WIDE * self.scale);
+        for row in 0..tall.round() as i64 {
+            let half = (row as f32 + 0.5) / tall * wide / 2.0;
+            let line = y.round() as i64 + if up { row } else { -1 - row };
+            for across in (x - half).round() as i64..(x + half).round() as i64 {
+                if (0..i64::from(size.0)).contains(&across)
+                    && (0..i64::from(size.1)).contains(&line)
+                {
+                    self.picture.put_pixel(across as u32, line as u32, ARROW);
+                }
+            }
+        }
+    }
+}
+
+/// The marks as a picture of a screen `width` by `height`: clear wherever nothing is
+/// marked, and all clear for a screen too small to read.
+pub fn draw(marks: &[Mark], width: u32, height: u32) -> RgbaImage {
+    let mut canvas = Canvas {
+        picture: RgbaImage::new(width, height),
+        scale: 0.0,
+    };
+    let Some(scale) = scale(width, height) else {
+        return canvas.picture;
+    };
+    canvas.scale = scale;
+    for mark in marks {
+        match *mark {
+            Mark::Guess {
+                student,
+                middle,
+                side,
+            } => {
+                let square = canvas.icon(student, middle, side);
+                canvas.frame(square, GUESS);
+            }
+            Mark::Pick(area) => canvas.frame(area, PICK),
+            Mark::Drop(area) => {
+                canvas.fill(area, VEIL);
+                canvas.frame(area, DROP);
+            }
+            Mark::Seek {
+                student,
+                way,
+                middle,
+            } => {
+                let (half, arrow) = (SEEK_SIDE / 2.0 + FRAME, ARROW_GAP + ARROW_TALL + FRAME);
+                let (up, down) = (way != Way::Down, way != Way::Up);
+                let ground = (
+                    middle.0 - half,
+                    middle.1 - half - if up { arrow } else { 0.0 },
+                    middle.0 + half,
+                    middle.1 + half + if down { arrow } else { 0.0 },
+                );
+                canvas.fill(ground, GROUND);
+                canvas.frame(ground, PICK);
+                canvas.icon(student, middle, SEEK_SIDE);
+                let reach = SEEK_SIDE / 2.0 + ARROW_GAP + ARROW_TALL;
+                if up {
+                    canvas.arrow((middle.0, middle.1 - reach), true);
+                }
+                if down {
+                    canvas.arrow((middle.0, middle.1 + reach), false);
+                }
+            }
+        }
+    }
+    canvas.picture
+}
+
+#[cfg(windows)]
+pub use window::Overlay;
+
+#[cfg(windows)]
+mod window {
+    use std::ptr::{null, null_mut};
+
+    use image::RgbaImage;
+    use windows_sys::{
+        Win32::{
+            Foundation::{HWND, POINT, SIZE},
+            Graphics::Gdi::{
+                AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
+                CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject,
+                GetDC, RGBQUAD, ReleaseDC, SelectObject,
+            },
+            UI::{
+                HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
+                WindowsAndMessaging::{
+                    CreateWindowExW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE, PeekMessageW,
+                    SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow, ULW_ALPHA, UpdateLayeredWindow,
+                    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+                    WS_EX_TRANSPARENT, WS_POPUP,
+                },
+            },
+        },
+        w,
+    };
+
+    use super::draw;
+    use crate::guide::Mark;
+
+    /// A window over the game's screen that shows the marks and takes no click: every click
+    /// goes to the window under it. It belongs to the thread that made it, which must call
+    /// `pump` now and then.
+    pub struct Overlay {
+        window: HWND,
+        shown: Option<Shown>,
+    }
+
+    /// What is shown: the marks, and where and how large the game's screen is.
+    #[derive(PartialEq)]
+    struct Shown {
+        marks: Vec<Mark>,
+        origin: (i32, i32),
+        size: (u32, u32),
+    }
+
+    impl Overlay {
+        /// `None` when Windows makes no window.
+        pub fn new() -> Option<Self> {
+            // SAFETY: the class is Windows' own, the title and the parents are null; the
+            // thread measures in the screen's pixels from here on, as the capture does.
+            let window = unsafe {
+                SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+                CreateWindowExW(
+                    WS_EX_LAYERED
+                        | WS_EX_TRANSPARENT
+                        | WS_EX_TOPMOST
+                        | WS_EX_NOACTIVATE
+                        | WS_EX_TOOLWINDOW,
+                    w!("STATIC"),
+                    null(),
+                    WS_POPUP,
+                    0,
+                    0,
+                    0,
+                    0,
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                    null(),
+                )
+            };
+            (!window.is_null()).then_some(Self {
+                window,
+                shown: None,
+            })
+        }
+
+        /// Shows the marks over the game's screen, whose top left corner is at `origin` on
+        /// the desktop and which is `size` large; hides the window for no marks.
+        pub fn show(&mut self, marks: &[Mark], origin: (i32, i32), size: (u32, u32)) {
+            if marks.is_empty() {
+                return self.hide();
+            }
+            let next = Shown {
+                marks: marks.to_vec(),
+                origin,
+                size,
+            };
+            if self.shown.as_ref() == Some(&next) {
+                return;
+            }
+            if self.put(&draw(marks, size.0, size.1), origin) {
+                // SAFETY: the window is this overlay's.
+                unsafe { ShowWindow(self.window, SW_SHOWNOACTIVATE) };
+                self.shown = Some(next);
+            }
+        }
+
+        pub fn hide(&mut self) {
+            if self.shown.take().is_some() {
+                // SAFETY: the window is this overlay's.
+                unsafe { ShowWindow(self.window, SW_HIDE) };
+            }
+        }
+
+        /// Answers what Windows asks of the window.
+        pub fn pump(&self) {
+            // SAFETY: the message outlives the calls.
+            unsafe {
+                let mut message: MSG = std::mem::zeroed();
+                while PeekMessageW(&raw mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    DispatchMessageW(&raw const message);
+                }
+            }
+        }
+
+        /// Makes the window the picture, at `origin`.
+        fn put(&self, picture: &RgbaImage, origin: (i32, i32)) -> bool {
+            let (width, height) = picture.dimensions();
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width as i32,
+                    // Rows from the top.
+                    biHeight: -(height as i32),
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB,
+                    biSizeImage: 0,
+                    biXPelsPerMeter: 0,
+                    biYPelsPerMeter: 0,
+                    biClrUsed: 0,
+                    biClrImportant: 0,
+                },
+                bmiColors: [RGBQUAD {
+                    rgbBlue: 0,
+                    rgbGreen: 0,
+                    rgbRed: 0,
+                    rgbReserved: 0,
+                }],
+            };
+            let (position, size, source) = (
+                POINT {
+                    x: origin.0,
+                    y: origin.1,
+                },
+                SIZE {
+                    cx: width as i32,
+                    cy: height as i32,
+                },
+                POINT { x: 0, y: 0 },
+            );
+            let blend = BLENDFUNCTION {
+                BlendOp: AC_SRC_OVER as u8,
+                BlendFlags: 0,
+                SourceConstantAlpha: 255,
+                AlphaFormat: AC_SRC_ALPHA as u8,
+            };
+            // SAFETY: every handle is checked or released here; `bits` is the bitmap's
+            // memory, `width * height` pixels of four bytes, while the bitmap lives.
+            unsafe {
+                let screen = GetDC(null_mut());
+                let memory = CreateCompatibleDC(screen);
+                let mut bits = null_mut();
+                let bitmap = CreateDIBSection(
+                    memory,
+                    &raw const info,
+                    DIB_RGB_COLORS,
+                    &raw mut bits,
+                    null_mut(),
+                    0,
+                );
+                let mut put = false;
+                if !bitmap.is_null() && !bits.is_null() {
+                    let pixels = std::slice::from_raw_parts_mut(
+                        bits.cast::<u8>(),
+                        width as usize * height as usize * 4,
+                    );
+                    // Windows takes blue first, and each colour times its alpha.
+                    for (to, from) in pixels.chunks_exact_mut(4).zip(picture.pixels()) {
+                        let [r, g, b, alpha] = from.0.map(u32::from);
+                        let lit = |colour: u32| (colour * alpha / 255) as u8;
+                        to.copy_from_slice(&[lit(b), lit(g), lit(r), alpha as u8]);
+                    }
+                    let before = SelectObject(memory, bitmap);
+                    put = UpdateLayeredWindow(
+                        self.window,
+                        screen,
+                        &raw const position,
+                        &raw const size,
+                        memory,
+                        &raw const source,
+                        0,
+                        &raw const blend,
+                        ULW_ALPHA,
+                    ) != 0;
+                    SelectObject(memory, before);
+                    DeleteObject(bitmap);
+                }
+                DeleteDC(memory);
+                ReleaseDC(null_mut(), screen);
+                put
+            }
+        }
+    }
+
+    impl Drop for Overlay {
+        fn drop(&mut self) {
+            // SAFETY: the window is this overlay's, and is not used again.
+            unsafe { DestroyWindow(self.window) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GUESS, PICK, draw};
+    use crate::guide::Mark;
+
+    const CARD: Mark = Mark::Pick((1000.0, 400.0, 1200.0, 600.0));
+
+    #[test]
+    fn a_card_to_pick_is_framed_and_left_clear() {
+        let picture = draw(&[CARD], 2370, 1333);
+        assert_eq!(picture.get_pixel(1002, 500), &PICK, "the frame's left side");
+        assert_eq!(
+            picture.get_pixel(1100, 500).0[3],
+            0,
+            "the card shows through"
+        );
+        assert_eq!(picture.get_pixel(990, 500).0[3], 0, "nothing beside it");
+    }
+
+    #[test]
+    fn the_marks_follow_the_windows_size() {
+        // On a Full HD screen the measured (1002, 500) lies at (811.8, 405.1).
+        let picture = draw(&[CARD], 1920, 1080);
+        assert_eq!(picture.get_pixel(812, 405), &PICK, "the frame's left side");
+        assert_eq!(
+            picture.get_pixel(1002, 500).0[3],
+            0,
+            "not where 2370 wide draws it"
+        );
+        let small = draw(&[CARD], 800, 450);
+        assert!(
+            small.pixels().all(|pixel| pixel.0[3] == 0),
+            "a screen too small to read is not marked"
+        );
+    }
+
+    #[test]
+    fn a_student_expected_is_drawn_as_the_icon_in_a_frame() {
+        let guess = Mark::Guess {
+            student: 10005,
+            middle: (365.0, 875.0),
+            side: 116.0,
+        };
+        let picture = draw(&[guess], 2370, 1333);
+        assert_eq!(picture.get_pixel(309, 875), &GUESS, "the frame");
+        assert_eq!(
+            picture.get_pixel(365, 875).0[3],
+            255,
+            "the icon covers the \"?\""
+        );
+        assert_eq!(picture.get_pixel(365, 700).0[3], 0, "nothing above");
+    }
+}

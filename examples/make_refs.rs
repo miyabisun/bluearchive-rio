@@ -4,8 +4,9 @@
 //!   cargo run --example make_refs
 //! The screen is `tests/fixtures/history.png`: the attacker on the left, whose labels show
 //! every digit. The right side's labels are left out: the tests read them. The "?" is the
-//! defender's picture in `tests/fixtures/anonymous.png`, and the opponent's dialog's title
-//! that of `tests/fixtures/opponent.png`.
+//! defender's picture in `tests/fixtures/anonymous.png`, the opponent's dialog's title
+//! that of `tests/fixtures/opponent.png`, and the formation dialog's (it lies in the same
+//! place) that of `tests/fixtures/formation.png`.
 
 use bluearchive_rio::{
     history::{digit_cells, icon_shape, role_shape, title_shape},
@@ -42,6 +43,10 @@ fn main() {
         .expect("the fixture")
         .to_rgb8();
     save(opponent::title_shape(&dialog), "opponent");
+    let forming = image::open("tests/fixtures/formation.png")
+        .expect("the fixture")
+        .to_rgb8();
+    save(opponent::title_shape(&forming), "formation");
 
     // Each digit is the mean of the cells showing it.
     let mut sums: Vec<Vec<u32>> = vec![Vec::new(); 10];

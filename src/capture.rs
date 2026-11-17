@@ -1,7 +1,7 @@
 //! Capturing the game's window on Windows, where Blue Archive runs, the way Aoi
 //! (bluearchive-aoi, its `watch::window`) does: Windows Graphics Capture of the window of
 //! `BlueArchive.exe`, cut to the client area. The game is only looked at: nothing is sent
-//! to it.
+//! to it. A frame comes with where the client area lies on the desktop, for `overlay`.
 
 use std::{
     sync::mpsc::{Receiver, SyncSender, sync_channel},
@@ -24,16 +24,30 @@ use windows_capture::{
 const GAME: &str = "BlueArchive.exe";
 /// How often the game's window is looked for.
 const LOOK_INTERVAL: Duration = Duration::from_secs(1);
-/// How often a frame is taken: a battle record stands still, so a few a second do.
-const INTERVAL: Duration = Duration::from_millis(200);
+/// How often a frame is taken: the marks over the formation dialog follow its list as it
+/// scrolls, and reading that dialog took 68 ms a frame (2026-11-17).
+const INTERVAL: Duration = Duration::from_millis(100);
 
 type CaptureError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Where a window's client area lies in the capture's frames, in physical pixels whatever
-/// DPI awareness the process runs with: left, top, width, height. A frame holds the
-/// window's visible frame (DWM's extended frame bounds): the title bar above the client
-/// area and a border around it.
-fn client_area(window: isize) -> Option<(u32, u32, u32, u32)> {
+/// A frame of the game's screen (its window's client area).
+pub struct Shot {
+    pub image: RgbImage,
+    /// The screen's top left corner on the desktop, in physical pixels; `None` when
+    /// Windows did not tell where the client area lies.
+    pub origin: Option<(i32, i32)>,
+    /// Whether the game's window is the one in front.
+    pub in_front: bool,
+}
+
+/// Left, top, width and height in a frame.
+type Place = (u32, u32, u32, u32);
+
+/// A window's client area in physical pixels, whatever DPI awareness the process runs
+/// with: where it lies in the capture's frames (left, top, width, height), and its top
+/// left corner on the desktop. A frame holds the window's visible frame (DWM's extended
+/// frame bounds): the title bar above the client area and a border around it.
+fn client_area(window: isize) -> Option<(Place, (i32, i32))> {
     use windows_sys::Win32::{
         Foundation::{POINT, RECT},
         Graphics::{
@@ -71,11 +85,21 @@ fn client_area(window: isize) -> Option<(u32, u32, u32, u32)> {
         return None;
     }
     Some((
-        offset(origin.x, frame.left)?,
-        offset(origin.y, frame.top)?,
-        offset(client.right, client.left)?,
-        offset(client.bottom, client.top)?,
+        (
+            offset(origin.x, frame.left)?,
+            offset(origin.y, frame.top)?,
+            offset(client.right, client.left)?,
+            offset(client.bottom, client.top)?,
+        ),
+        (origin.x, origin.y),
     ))
+}
+
+/// Whether a window is the one in front.
+fn in_front(window: isize) -> bool {
+    // SAFETY: the call takes nothing and returns a handle that is only compared.
+    let front = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+    front as isize == window
 }
 
 /// The client area `(left, top, width, height)` of a window's frame, `frame_width` pixels
@@ -96,14 +120,14 @@ fn client_rgb(
 }
 
 struct Capture {
-    frames: SyncSender<RgbImage>,
+    frames: SyncSender<Shot>,
     /// The game's window handle.
     window: isize,
     taken: Option<Instant>,
 }
 
 impl GraphicsCaptureApiHandler for Capture {
-    type Flags = (SyncSender<RgbImage>, isize);
+    type Flags = (SyncSender<Shot>, isize);
     type Error = CaptureError;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
@@ -129,14 +153,18 @@ impl GraphicsCaptureApiHandler for Capture {
         // The frame holds the title bar and a border around the client area.
         let mut buffer = frame.buffer()?;
         let (width, height) = (buffer.width(), buffer.height());
-        let (left, top, w, h) = client_area(self.window)
-            .filter(|&(l, t, w, h)| l + w <= width && t + h <= height)
-            .unwrap_or((0, 0, width, height));
+        let client =
+            client_area(self.window).filter(|&((l, t, w, h), _)| l + w <= width && t + h <= height);
+        let (left, top, w, h) = client.map_or((0, 0, width, height), |(area, _)| area);
         let pixels = buffer.as_nopadding_buffer()?;
         if let Some(image) = RgbImage::from_raw(w, h, client_rgb(pixels, width, (left, top, w, h)))
         {
             // A frame come while the last is still being read is left out.
-            let _ = self.frames.try_send(image);
+            let _ = self.frames.try_send(Shot {
+                image,
+                origin: client.map(|(_, origin)| origin),
+                in_front: in_front(self.window),
+            });
         }
         Ok(())
     }
@@ -193,7 +221,7 @@ fn game_window() -> Option<Window> {
 
 fn capture(
     window: Window,
-    frames: SyncSender<RgbImage>,
+    frames: SyncSender<Shot>,
 ) -> Result<CaptureControl<Capture, CaptureError>, String> {
     let settings = Settings::new(
         window,
@@ -210,7 +238,7 @@ fn capture(
 
 /// The frames of the game's window, a few a second while it is open; the window is looked
 /// for again whenever it is gone. What happens to the window is told through `tell`.
-pub fn frames(tell: impl Fn(&str) + Send + 'static) -> Receiver<RgbImage> {
+pub fn frames(tell: impl Fn(&str) + Send + 'static) -> Receiver<Shot> {
     let (sender, receiver) = sync_channel(1);
     thread::spawn(move || {
         let mut session: Option<(Window, CaptureControl<Capture, CaptureError>)> = None;

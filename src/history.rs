@@ -99,38 +99,50 @@ const PLATE_HEIGHT: u32 = 32;
 /// A frame and how large it draws the game: the measured screen's parts scale with the
 /// width of a 16:9 window (Aoi's `screen::unit`) about the frame's middle.
 pub(crate) struct Sheet<'a> {
-    frame: &'a RgbImage,
-    scale: f32,
+    pub(crate) frame: &'a RgbImage,
+    pub(crate) scale: f32,
+}
+
+/// How large a screen of this size draws the game beside the measured one; `None` for a
+/// screen too small to read, or upright.
+pub(crate) fn scale(width: u32, height: u32) -> Option<f32> {
+    let (width, height) = (width as f32, height as f32);
+    let wide = width * 9.0 / 16.0;
+    let unit = if (wide - height).abs() < 1.0 {
+        height
+    } else {
+        wide
+    };
+    let drawn = unit * 16.0 / 9.0;
+    (width > height && drawn >= SMALLEST).then_some(drawn / MEASURED.0)
+}
+
+/// Where a point of the measured screen lies on a screen of `size` drawn at `scale`.
+pub(crate) fn spot((width, height): (u32, u32), scale: f32, (x, y): (f32, f32)) -> (f32, f32) {
+    (
+        width as f32 / 2.0 + (x - MEASURED.0 / 2.0) * scale,
+        height as f32 / 2.0 + (y - MEASURED.1 / 2.0) * scale,
+    )
 }
 
 impl<'a> Sheet<'a> {
-    /// `None` for a screen too small to read, or upright.
+    /// `None` for a screen `scale` does not read.
     pub(crate) fn of(frame: &'a RgbImage) -> Option<Self> {
-        let (width, height) = (frame.width() as f32, frame.height() as f32);
-        let wide = width * 9.0 / 16.0;
-        let unit = if (wide - height).abs() < 1.0 {
-            height
-        } else {
-            wide
-        };
-        let drawn = unit * 16.0 / 9.0;
-        (width > height && drawn >= SMALLEST).then_some(Self {
-            frame,
-            scale: drawn / MEASURED.0,
-        })
+        scale(frame.width(), frame.height()).map(|scale| Self { frame, scale })
+    }
+
+    /// Where a point of the measured screen lies in the frame.
+    pub(crate) fn spot(&self, point: (f32, f32)) -> (f32, f32) {
+        spot(self.frame.dimensions(), self.scale, point)
     }
 
     /// The frame's pixels of `area`, moved `shift` to the right.
     pub(crate) fn crop(&self, (left, top, right, bottom): Area, shift: f32) -> Option<RgbImage> {
-        let x =
-            |x: f32| self.frame.width() as f32 / 2.0 + (x + shift - MEASURED.0 / 2.0) * self.scale;
-        let y = |y: f32| self.frame.height() as f32 / 2.0 + (y - MEASURED.1 / 2.0) * self.scale;
-        let (x0, y0, x1, y1) = (
-            x(left).round(),
-            y(top).round(),
-            x(right).round(),
-            y(bottom).round(),
+        let ((x0, y0), (x1, y1)) = (
+            self.spot((left + shift, top)),
+            self.spot((right + shift, bottom)),
         );
+        let (x0, y0, x1, y1) = (x0.round(), y0.round(), x1.round(), y1.round());
         let inside = x0 >= 0.0
             && y0 >= 0.0
             && x1 <= self.frame.width() as f32
@@ -373,7 +385,7 @@ pub fn digit_cells(frame: &RgbImage, right: bool, slot: usize) -> Option<Vec<Gra
 const NAME_GAP: f32 = 13.0;
 
 /// The name of the line "Lv.90 name" in `line`: what follows the first wide gap.
-fn plate(line: &RgbImage, scale: f32) -> Option<Plate> {
+pub(crate) fn plate(line: &RgbImage, scale: f32) -> Option<Plate> {
     let inked: Vec<bool> = (0..line.width())
         .map(|x| (0..line.height()).any(|y| ink(line.get_pixel(x, y)) >= INKED))
         .collect();
@@ -559,6 +571,8 @@ pub struct Reader {
     faces: Vec<Face>,
     /// "対戦相手", the title of the dialog `opponent` reads.
     pub(crate) front: GrayImage,
+    /// "編成", the title of the dialog `formation` reads.
+    pub(crate) forming: GrayImage,
 }
 
 impl Default for Reader {
@@ -583,6 +597,7 @@ impl Reader {
             ],
             anonymous: reference(include_bytes!("../data/anonymous.png")),
             front: reference(include_bytes!("../data/opponent.png")),
+            forming: reference(include_bytes!("../data/formation.png")),
             digits: (0..10)
                 .map(|digit| {
                     imageops::crop_imm(&digits, digit * DIGIT_SIZE.0, 0, DIGIT_SIZE.0, DIGIT_SIZE.1)

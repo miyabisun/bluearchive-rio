@@ -8,7 +8,7 @@ use image::{GrayImage, RgbImage};
 
 use crate::{
     Squad,
-    history::{Area, LIKE, Reader, Sheet, TITLE_SIZE, ink, likeness, shape},
+    history::{Area, LIKE, Plate, Reader, Sheet, TITLE_SIZE, ink, likeness, plate, shape},
 };
 
 /// What the dialog shows of the opponent's defense: D1 and the specials, the lower id
@@ -24,17 +24,28 @@ const TITLE: Area = (1070.0, 145.0, 1300.0, 215.0);
 /// The middle of the icon on the first card of the opponent's row, the step to the next
 /// card and the side of the square the icon is drawn in: on 2026-11-17 nine cards fitted
 /// their students' icons 100 to 107 wide, 61 to 62 right and 48 to 51 below a card's corner.
-const CARD: (f32, f32) = (1046.5, 381.0);
-const CARD_STEP: f32 = 120.0;
-const CARD_SIDE: f32 = 101.0;
+pub(crate) const CARD: (f32, f32) = (1046.5, 381.0);
+pub(crate) const CARD_STEP: f32 = 120.0;
+pub(crate) const CARD_SIDE: f32 = 101.0;
 /// The rows of an icon (of 24) a card shows clear of "Lv.90" above, and of the star and
 /// the role's mark below.
-const CARD_ROWS: Range<u32> = 6..17;
+pub(crate) const CARD_ROWS: Range<u32> = 6..17;
+/// The line "Lv.90 name" under the opponent's cards. The dialog draws it as large as the
+/// battle record draws its own (a name's letters measured 28, 31 and 28 wide and 33 tall
+/// on both), so the two screens' plates of one name compare.
+const NAME: Area = (482.0, 487.0, 910.0, 539.0);
 
 /// The shape of the title's place, for `make_refs` and the reader.
 pub fn title_shape(frame: &RgbImage) -> Option<GrayImage> {
     let sheet = Sheet::of(frame)?;
     Some(shape(&sheet.crop(TITLE, 0.0)?, ink, TITLE_SIZE))
+}
+
+/// The opponent's name as a frame's opponent dialog draws it: the plate the battle records
+/// know a player by. The dialog is told by `Reader::front`.
+pub fn name(frame: &RgbImage) -> Option<Plate> {
+    let sheet = Sheet::of(frame)?;
+    plate(&sheet.crop(NAME, 0.0)?, sheet.scale)
 }
 
 impl Reader {

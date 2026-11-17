@@ -2,13 +2,17 @@
 //! shows: the battle records (`history`) in a database (`store`), told with the students of
 //! the SchaleDB snapshot, and the students held as Aoi wrote them (`aoi`). Before a battle
 //! it reads what the opponent's dialog shows of the defense (`opponent`), to look up what
-//! stood behind it in the records.
+//! stood behind it in the records; in the formation dialog (`formation`) it marks over the
+//! game (`guide`, `overlay`) the students of the attack that won most against that defense.
 
 pub mod aoi;
 #[cfg(windows)]
 pub mod capture;
+pub mod formation;
+pub mod guide;
 pub mod history;
 pub mod opponent;
+pub mod overlay;
 pub mod store;
 
 use include_dir::{Dir, include_dir};

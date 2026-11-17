@@ -14,6 +14,8 @@ pub struct Held {
     pub level: Option<u8>,
     /// The stars, 1 to 5.
     pub rarity: Option<u8>,
+    /// The bond rank.
+    pub bond: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -74,12 +76,14 @@ items:
                     name: "ホシノ".to_owned(),
                     level: Some(90),
                     rarity: Some(5),
+                    bond: Some(26),
                 },
                 Held {
                     id: None,
                     name: "ツムギ".to_owned(),
                     level: None,
                     rarity: Some(3),
+                    bond: None,
                 },
             ]
         );
