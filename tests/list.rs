@@ -75,6 +75,14 @@ const FRESH: [(f32, Told); 3] = [
     (747.0, (true, false, true, 5, Unit::Minute)),
 ];
 
+/// Three attacks 2, 3 and 6 minutes old, the last two against one player. No reference is
+/// cut from this screen, and no screen the references are cut from shows a "6".
+const SIX: [(f32, Told); 3] = [
+    (398.0, (true, true, true, 2, Unit::Minute)),
+    (573.0, (true, true, true, 3, Unit::Minute)),
+    (747.0, (true, false, true, 6, Unit::Minute)),
+];
+
 fn assert_rows(shown: &[Shown], rows: &[(f32, Told)], what: &str) {
     let tops: Vec<f32> = shown.iter().map(|shown| shown.top.round()).collect();
     let expected: Vec<f32> = rows.iter().map(|(top, _)| *top).collect();
@@ -96,6 +104,8 @@ fn the_rows_in_full_sight_are_read() {
     assert_rows(&shown, &ATTACKS, "a list of attacks");
     let shown = reader.list(&screen("list-fresh")).expect("the list");
     assert_rows(&shown, &FRESH, "the list right after a battle");
+    let shown = reader.list(&screen("list-six")).expect("the list");
+    assert_rows(&shown, &SIX, "a row six minutes old");
 }
 
 #[test]
@@ -108,6 +118,14 @@ fn two_rows_of_two_players_show_two_names() {
     };
     assert!(!name(1).same(&name(2)), "two players");
     assert!(name(1).same(&name(1)), "one player");
+    // Two rows of one player.
+    let shown = reader.list(&screen("list-six")).expect("the list");
+    let name = |at: usize| {
+        let row = shown[at].row.as_ref().expect("the row reads");
+        row.opponent.clone().expect("an opponent with a name")
+    };
+    assert!(name(1).same(&name(2)), "one player on two rows");
+    assert!(!name(0).same(&name(1)), "and another");
 }
 
 #[test]
@@ -118,6 +136,7 @@ fn other_window_sizes_read_the_same_or_nothing() {
         ("list-scrolled", &SCROLLED[..]),
         ("list-attacks", &ATTACKS[..]),
         ("list-fresh", &FRESH[..]),
+        ("list-six", &SIX[..]),
     ];
     for (name, rows) in lists {
         let screen = screen(name);
