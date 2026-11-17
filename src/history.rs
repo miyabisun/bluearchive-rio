@@ -571,6 +571,31 @@ pub(crate) const LIKE: f32 = 0.9;
 /// least, and two players' own pictures 0.034 at most.
 const UNLIKE: f32 = 0.5;
 
+/// Where a face is looked for about its place: the sizes of the square against the usual
+/// one, and the pixels off it across and down.
+struct Places {
+    sizes: &'static [f32],
+    off: &'static [f32],
+}
+
+/// An icon's face fills its square more or less (マリナ's fitted 86 wide where the others
+/// fitted 80 to 83).
+const NEAR_BY: Places = Places {
+    sizes: &[0.94, 1.0, 1.06],
+    off: &[-1.5, 0.0, 1.5],
+};
+/// Looked at when the places near by do not tell the student: ツクヨ's icon fitted 79 wide,
+/// 3 right of its place and 1 up. Measured on 2026-11-17: near by it lay 10.3 from her icon
+/// (22.7 from the next student's), here 4.3.
+const FARTHER: Places = Places {
+    sizes: &[0.91, 0.94, 0.97, 1.0, 1.03, 1.06, 1.09],
+    off: &[-4.5, -3.0, -1.5, 0.0, 1.5, 3.0, 4.5],
+};
+
+/// Only the students whose icons lie within this near by are looked for farther off: so a
+/// square that shows no student costs no more, and one that shows a student a little.
+const FACE_FAR: f32 = 25.0;
+
 /// What a side of the record shows.
 struct Side {
     attacks: bool,
@@ -714,31 +739,46 @@ impl Reader {
         rows: &Range<u32>,
         squad: Squad,
     ) -> Option<i64> {
-        let mut patches = Vec::new();
-        for size in [0.94, 1.0, 1.06] {
-            for down in [-1.5, 0.0, 1.5] {
-                for across in [-1.5, 0.0, 1.5] {
-                    let half = side * size / 2.0;
-                    let (x, y) = (middle.0 + across, middle.1 + down);
-                    let square = sheet.crop((x - half, y - half, x + half, y + half), 0.0)?;
-                    let patch =
-                        imageops::resize(&square, FACE_SIZE, FACE_SIZE, FilterType::Triangle);
-                    patches.push(patch.pixels().map(|pixel| pixel.0).collect::<Vec<_>>());
-                }
-            }
-        }
         let known: Vec<&Face> = self
             .faces
             .iter()
             .filter(|face| face.squad == squad)
             .collect();
-        let nearest = |face: &&Face| {
-            patches
-                .iter()
-                .map(|patch| face.distance(patch, rows))
-                .fold(f32::MAX, f32::min)
+        // How far each of the students' icons is from the square, at the best of the places.
+        let distances = |places: &Places, known: &[&Face]| {
+            let mut patches = Vec::new();
+            for size in places.sizes {
+                for down in places.off {
+                    for across in places.off {
+                        let half = side * size / 2.0;
+                        let (x, y) = (middle.0 + across, middle.1 + down);
+                        let square = sheet.crop((x - half, y - half, x + half, y + half), 0.0)?;
+                        let patch =
+                            imageops::resize(&square, FACE_SIZE, FACE_SIZE, FilterType::Triangle);
+                        patches.push(patch.pixels().map(|pixel| pixel.0).collect::<Vec<_>>());
+                    }
+                }
+            }
+            let nearest = |face: &&Face| {
+                patches
+                    .iter()
+                    .map(|patch| face.distance(patch, rows))
+                    .fold(f32::MAX, f32::min)
+            };
+            Some(known.iter().map(nearest).collect::<Vec<f32>>())
         };
-        clear(known.iter().map(nearest), FACE_NEAR).map(|at| known[at].student)
+        let near_by = distances(&NEAR_BY, &known)?;
+        if let Some(at) = clear(near_by.iter().copied(), FACE_NEAR) {
+            return Some(known[at].student);
+        }
+        // An icon drawn off its place: the students it may be are looked for farther off.
+        let may_be: Vec<&Face> = known
+            .iter()
+            .zip(&near_by)
+            .filter(|(_, distance)| **distance <= FACE_FAR)
+            .map(|(face, _)| *face)
+            .collect();
+        clear(distances(&FARTHER, &may_be)?.into_iter(), FACE_NEAR).map(|at| may_be[at].student)
     }
 
     /// The damage on the label over a side's `slot`.

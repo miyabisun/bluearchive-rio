@@ -35,6 +35,12 @@ fn lost() -> RgbImage {
     screen("lost")
 }
 
+/// A battle the other fixtures' attacker attacked and lost: the sword and "Lose" on the
+/// left. ツクヨ's icon is drawn smaller than the others' and 3 pixels right of their place.
+fn attacked() -> RgbImage {
+    screen("attacked")
+}
+
 /// A screen as a window `width` wide draws it.
 fn drawn(screen: &RgbImage, width: u32) -> RgbImage {
     let height = (screen.height() as f32 * width as f32 / screen.width() as f32).round() as u32;
@@ -159,6 +165,31 @@ fn assert_the_defeat(battle: &Battle, width: u32) {
     assert_eq!(battle.defender.team, defense, "the defense, at {width}");
 }
 
+/// The record of the attack lost: ハルナ（正月）, ツクヨ, マリナ, ハスミ（水着） with イロハ
+/// and ミチル（ドレス） attacked マリナ, トキ, アツコ, ハスミ（水着） with イロハ and
+/// ミチル（ドレス）, and lost.
+fn assert_the_attack_lost(battle: &Battle, width: u32) {
+    assert!(!battle.attacker_won, "the defender won, at {width}");
+    let attack = team([
+        (10057, 359_801),
+        (10040, 27188),
+        (10037, 26769),
+        (10124, 162_153),
+        (20016, 287_041),
+        (20053, 0),
+    ]);
+    let defense = team([
+        (10037, 107_534),
+        (10062, 704_975),
+        (10042, 112_135),
+        (10124, 155_859),
+        (20016, 534_835),
+        (20053, 0),
+    ]);
+    assert_eq!(battle.attacker.team, attack, "the attack, at {width}");
+    assert_eq!(battle.defender.team, defense, "the defense, at {width}");
+}
+
 /// Every window size reads a screen as `check` has it or does not read it, and the sizes
 /// of `READ` do read it.
 fn assert_at_other_sizes(screen: &RgbImage, check: fn(&Battle, u32)) {
@@ -191,6 +222,7 @@ fn other_window_sizes_read_the_same_or_nothing() {
     assert_at_other_sizes(&anonymous(), assert_the_anonymous_record);
     assert_at_other_sizes(&defended(), assert_the_defense);
     assert_at_other_sizes(&lost(), assert_the_defeat);
+    assert_at_other_sizes(&attacked(), assert_the_attack_lost);
 }
 
 #[test]
@@ -248,6 +280,22 @@ fn a_defense_is_read_with_the_shield_on_the_left() {
         let battle = reader.read(&drawn(&defended(), width));
         assert_the_defense(&battle.expect("the record reads"), width);
     }
+}
+
+#[test]
+fn an_attack_lost_is_read_with_an_icon_off_its_place() {
+    let reader = Reader::new();
+    let battle = reader.read(&attacked()).expect("the record reads");
+    assert_the_attack_lost(&battle, 2370);
+    let named = reader.read(&fixture()).expect("the record reads");
+    assert!(
+        plate(&battle.attacker).same(&plate(&named.attacker)),
+        "the attacker of the other record"
+    );
+    assert!(
+        !plate(&battle.defender).same(&plate(&named.defender)),
+        "another defender"
+    );
 }
 
 #[test]
