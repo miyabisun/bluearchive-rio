@@ -29,6 +29,12 @@ fn defended() -> RgbImage {
     screen("defended")
 }
 
+/// A battle the other fixtures' attacker defended and lost: "Lose" on the left, and the
+/// winner's side on the right, whose ground wavers a shade from frame to frame.
+fn lost() -> RgbImage {
+    screen("lost")
+}
+
 /// A screen as a window `width` wide draws it.
 fn drawn(screen: &RgbImage, width: u32) -> RgbImage {
     let height = (screen.height() as f32 * width as f32 / screen.width() as f32).round() as u32;
@@ -128,6 +134,31 @@ fn assert_the_defense(battle: &Battle, width: u32) {
     assert_eq!(battle.defender.team, defense, "the defense, at {width}");
 }
 
+/// The record of the defense lost: シュン, ユウカ, ミカ, エイミ with ミチル（ドレス） and
+/// イロハ attacked マリナ, ホシノ, ヒビキ（応援団）, ハスミ（水着） with ミチル（ドレス） and
+/// イロハ, and won. A damage of seven digits is on it.
+fn assert_the_defeat(battle: &Battle, width: u32) {
+    assert!(battle.attacker_won, "the attacker won, at {width}");
+    let attack = team([
+        (10011, 202_130),
+        (13010, 314_616),
+        (10059, 380_795),
+        (10001, 299_288),
+        (20016, 431_559),
+        (20053, 0),
+    ]);
+    let defense = team([
+        (10037, 326_786),
+        (10005, 39386),
+        (16010, 1_018_418),
+        (10124, 369_883),
+        (20016, 790_292),
+        (20053, 0),
+    ]);
+    assert_eq!(battle.attacker.team, attack, "the attack, at {width}");
+    assert_eq!(battle.defender.team, defense, "the defense, at {width}");
+}
+
 /// Every window size reads a screen as `check` has it or does not read it, and the sizes
 /// of `READ` do read it.
 fn assert_at_other_sizes(screen: &RgbImage, check: fn(&Battle, u32)) {
@@ -159,6 +190,7 @@ fn other_window_sizes_read_the_same_or_nothing() {
     assert_at_other_sizes(&fixture(), assert_the_record);
     assert_at_other_sizes(&anonymous(), assert_the_anonymous_record);
     assert_at_other_sizes(&defended(), assert_the_defense);
+    assert_at_other_sizes(&lost(), assert_the_defeat);
 }
 
 #[test]
@@ -219,6 +251,22 @@ fn a_defense_is_read_with_the_shield_on_the_left() {
 }
 
 #[test]
+fn a_defense_lost_is_read_with_lose_on_the_left() {
+    let reader = Reader::new();
+    let battle = reader.read(&lost()).expect("the record reads");
+    assert_the_defeat(&battle, 2370);
+    let won = reader.read(&defended()).expect("the record reads");
+    assert!(
+        plate(&battle.defender).same(&plate(&won.defender)),
+        "the defender of the defense won"
+    );
+    assert!(
+        !plate(&battle.attacker).same(&plate(&won.attacker)),
+        "another attacker"
+    );
+}
+
+#[test]
 fn a_screen_without_the_record_is_not_read() {
     let reader = Reader::new();
     // The record's title covered: another dialog of the same layout.
@@ -229,6 +277,7 @@ fn a_screen_without_the_record_is_not_read() {
         }
     }
     assert_eq!(reader.read(&covered), None, "no title");
+    assert!(!reader.titled(&covered), "nor is it known as a record");
     assert_eq!(
         reader.read(&RgbImage::new(1920, 1080)),
         None,
@@ -252,6 +301,10 @@ fn a_record_missing_a_part_is_not_read() {
         }
     }
     assert_eq!(reader.read(&unknown), None, "an unknown face");
+    assert!(
+        reader.titled(&unknown),
+        "still known as a record, by its title"
+    );
     // Both sides winning: the defender's "Lose" painted as the attacker's "Win".
     let mut both = fixture();
     let win = imageops::crop_imm(&both, 215, 335, 225, 110).to_image();

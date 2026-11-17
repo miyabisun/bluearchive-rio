@@ -55,6 +55,25 @@ pub struct Battle {
     pub attacker_won: bool,
 }
 
+impl Battle {
+    /// Whether two readings are of one record: the students, the damage and the winner as
+    /// they are, and the names drawn the same (`Plate::same`). The winner's side wavers a
+    /// shade from frame to frame, and a name on it is never twice the same pixels.
+    pub fn alike(&self, other: &Self) -> bool {
+        let same = |a: &Party, b: &Party| {
+            a.team == b.team
+                && match (&a.plate, &b.plate) {
+                    (Some(a), Some(b)) => a.same(b),
+                    (None, None) => true,
+                    _ => false,
+                }
+        };
+        self.attacker_won == other.attacker_won
+            && same(&self.attacker, &other.attacker)
+            && same(&self.defender, &other.defender)
+    }
+}
+
 /// The screen the parts were measured on.
 const MEASURED: (f32, f32) = (2370.0, 1333.0);
 /// The least width a screen is read at, as Aoi's.
@@ -608,10 +627,16 @@ impl Reader {
         }
     }
 
+    /// Whether a frame shows a battle record, by its title: so a record is known as one
+    /// while a part of it does not read.
+    pub fn titled(&self, frame: &RgbImage) -> bool {
+        title_shape(frame).is_some_and(|title| likeness(&title, &self.title) >= LIKE)
+    }
+
     /// The battle a frame's record shows, or `None` for any other screen and for a record
     /// with a part that does not read.
     pub fn read(&self, frame: &RgbImage) -> Option<Battle> {
-        if likeness(&title_shape(frame)?, &self.title) < LIKE {
+        if !self.titled(frame) {
             return None;
         }
         let (left, right) = (self.side(frame, false)?, self.side(frame, true)?);
@@ -739,30 +764,32 @@ impl Reader {
 /// opens, and a record read in between must not be kept.
 pub const STILL: Duration = Duration::from_secs(1);
 
-/// Tells a reading once it has stood still (see `STILL`).
+/// Tells a reading once it has stood still (see `STILL`): the same from frame to frame, as
+/// `same` has it.
 pub struct Steady<T> {
     seen: Option<(T, Instant)>,
     told: bool,
+    same: fn(&T, &T) -> bool,
 }
 
-impl<T: PartialEq> Default for Steady<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T: PartialEq> Steady<T> {
-    pub fn new() -> Self {
+impl<T> Steady<T> {
+    pub fn new(same: fn(&T, &T) -> bool) -> Self {
         Self {
             seen: None,
             told: false,
+            same,
         }
+    }
+
+    /// Whether the reading now seen has stood still and was told.
+    pub fn told(&self) -> bool {
+        self.told
     }
 
     /// What a frame read `now` showed; the reading, once, when it has stood still.
     pub fn see(&mut self, reading: Option<T>, now: Instant) -> Option<&T> {
         let since = match (&self.seen, &reading) {
-            (Some((seen, since)), Some(reading)) if seen == reading => *since,
+            (Some((seen, since)), Some(reading)) if (self.same)(seen, reading) => *since,
             _ => {
                 self.told = false;
                 now
@@ -780,12 +807,69 @@ impl<T: PartialEq> Steady<T> {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{Fighter, STILL, Steady, in_order};
+    use image::{GrayImage, Luma};
+
+    use super::{Battle, Fighter, Party, Plate, STILL, Steady, in_order};
+
+    /// A name of one stroke, `shade` bright, `down` from the top.
+    fn name(shade: u8, down: u32) -> Option<Plate> {
+        let mut drawn = GrayImage::new(40, 32);
+        for x in 4..36 {
+            for y in down..down + 3 {
+                drawn.put_pixel(x, y, Luma([shade]));
+            }
+        }
+        Some(Plate(drawn))
+    }
+
+    fn battle(attacker: Option<Plate>, damage: u32) -> Battle {
+        let team =
+            [10005, 10037, 16010, 10124, 20016, 20053].map(|student| Fighter { student, damage });
+        Battle {
+            attacker: Party {
+                plate: attacker,
+                team,
+            },
+            defender: Party { plate: None, team },
+            attacker_won: true,
+        }
+    }
+
+    #[test]
+    fn a_name_drawn_a_shade_apart_is_the_same_reading() {
+        let read = battle(name(200, 10), 7);
+        // The winner's side wavers: the same strokes, a shade apart (a record with such a
+        // name never stood still, and was not kept: 2026-11-17).
+        assert!(read.alike(&battle(name(201, 10), 7)), "a shade apart");
+        assert!(!read.alike(&battle(name(200, 20), 7)), "another name");
+        assert!(!read.alike(&battle(None, 7)), "nobody's name");
+        assert!(!read.alike(&battle(name(200, 10), 8)), "another damage");
+        let mut lost = battle(name(200, 10), 7);
+        lost.attacker_won = false;
+        assert!(!read.alike(&lost), "another winner");
+    }
+
+    #[test]
+    fn a_reading_stands_still_by_its_own_measure() {
+        let start = Instant::now();
+        // The same in the tens.
+        let mut steady = Steady::new(|a: &i32, b: &i32| a / 10 == b / 10);
+        assert!(!steady.told(), "nothing seen");
+        steady.see(Some(70), start);
+        assert_eq!(steady.see(Some(71), start + STILL / 2), None, "not yet");
+        assert!(!steady.told(), "not yet told");
+        assert_eq!(steady.see(Some(72), start + STILL), Some(&72), "still");
+        assert!(steady.told(), "told");
+        assert_eq!(steady.see(Some(73), start + STILL * 2), None, "once");
+        assert!(steady.told(), "and told while it stays");
+        assert_eq!(steady.see(Some(80), start + STILL * 3), None, "another");
+        assert!(!steady.told(), "the new one is not told yet");
+    }
 
     #[test]
     fn a_reading_is_told_once_when_it_has_stood_still() {
         let start = Instant::now();
-        let mut steady = Steady::new();
+        let mut steady = Steady::new(i32::eq);
         assert_eq!(steady.see(Some(7), start), None, "just seen");
         assert_eq!(
             steady.see(Some(7), start + STILL / 2),
@@ -799,7 +883,7 @@ mod tests {
     #[test]
     fn a_reading_that_changes_starts_over() {
         let start = Instant::now();
-        let mut steady = Steady::new();
+        let mut steady = Steady::new(i32::eq);
         steady.see(Some(7), start);
         // The bars still grow: another number.
         assert_eq!(steady.see(Some(8), start + STILL), None, "changed");

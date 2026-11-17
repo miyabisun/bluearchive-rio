@@ -36,12 +36,24 @@ pub fn status_view(status: &Status) -> StatusView {
                 .to_owned(),
             Tone::Idle,
         ),
+        // A record says whether it is kept: read and kept look alike in the game.
+        Status::Watching(Some(Screen::Record { kept: false })) => (
+            "戦闘履歴を読み取り中",
+            "この戦闘を読んでいます。画面が 1 秒止まると登録します。\n読み取り中のままのときは、ゲームのウィンドウの大きさを少し変えてください。\n押すと読み取りを一時中断します。"
+                .to_owned(),
+            Tone::Idle,
+        ),
+        Status::Watching(Some(Screen::Record { kept: true })) => (
+            "戦闘履歴・登録済み",
+            "この戦闘は登録済みです。「履歴」タブにあります。\n押すと読み取りを一時中断します。"
+                .to_owned(),
+            Tone::Active,
+        ),
         Status::Watching(screen) => (
             match screen {
-                None => "読み取り中",
-                Some(Screen::Record) => "戦闘履歴",
                 Some(Screen::Opponent) => "対戦相手",
                 Some(Screen::Formation) => "編成",
+                Some(Screen::Record { .. }) | None => "読み取り中",
             },
             "ゲームのウィンドウを読んでいます。押すと読み取りを一時中断します。".to_owned(),
             Tone::Active,
@@ -116,6 +128,18 @@ mod tests {
 
     #[test]
     fn the_badge_names_the_screen_read() {
+        let view = status_view(&Status::Watching(Some(Screen::Record { kept: false })));
+        assert_eq!(
+            (view.label.as_str(), view.tone),
+            ("戦闘履歴を読み取り中", Tone::Idle),
+            "a record not kept yet"
+        );
+        let view = status_view(&Status::Watching(Some(Screen::Record { kept: true })));
+        assert_eq!(
+            (view.label.as_str(), view.tone),
+            ("戦闘履歴・登録済み", Tone::Active),
+            "a record kept"
+        );
         let view = status_view(&Status::Watching(Some(Screen::Formation)));
         assert_eq!((view.label.as_str(), view.tone), ("編成", Tone::Active));
         let view = status_view(&Status::Watching(None));

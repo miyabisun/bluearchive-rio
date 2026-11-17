@@ -16,8 +16,9 @@ use crate::{
 /// A screen of the game that Rio reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
-    /// A battle record (戦闘履歴).
-    Record,
+    /// A battle record (戦闘履歴): whether it is kept, by now or from before. Not kept, it
+    /// is being read, or has not stood still for long enough yet.
+    Record { kept: bool },
     /// An opponent's dialog (対戦相手).
     Opponent,
     /// The formation dialog (編成).
@@ -96,7 +97,7 @@ fn run(
         aoi,
         capture::{self, Seen},
         guide::{self, Rank, Visit},
-        history::{Reader, Steady},
+        history::{Battle, Reader, Steady},
         opponent,
         overlay::Overlay,
         store::Store,
@@ -123,7 +124,7 @@ fn run(
     );
     // Without the window over the game, the counsel still shows in Rio's own.
     let mut overlay = Overlay::new();
-    let (mut steady, mut visit) = (Steady::new(), Visit::default());
+    let (mut steady, mut visit) = (Steady::new(Battle::alike), Visit::default());
     // The opponent whose dialog was open last: the formation dialog shows the front again,
     // without the name.
     let mut met: Option<(Front, Option<Plate>)> = None;
@@ -174,7 +175,7 @@ fn run(
         };
         let (frame, now) = (&shot.image, Instant::now());
         let record = reader.read(frame);
-        let mut screen = record.is_some().then_some(Screen::Record);
+        let recorded = record.is_some() || reader.titled(frame);
         if let Some(battle) = steady.see(record, now)
             && store.save(battle).map_err(records)?
         {
@@ -192,6 +193,10 @@ fn run(
             }
         }
 
+        // Told, the record is in the database: kept just now, or found there from before.
+        let mut screen = recorded.then_some(Screen::Record {
+            kept: steady.told(),
+        });
         let (dialog, forming) = (reader.front(frame), reader.formation(frame));
         if let Some(front) = dialog {
             met = Some((front, opponent::name(frame)));
