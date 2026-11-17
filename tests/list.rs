@@ -67,6 +67,14 @@ const ATTACKS: [(f32, Told); 2] = [
     (735.0, (true, true, true, 21, Unit::Hour)),
 ];
 
+/// The list right after a battle: the attack just won tells "0分前", under attacks 2 and 5
+/// minutes old. No reference is cut from this screen either.
+const FRESH: [(f32, Told); 3] = [
+    (398.0, (true, true, true, 0, Unit::Minute)),
+    (572.0, (true, true, true, 2, Unit::Minute)),
+    (747.0, (true, false, true, 5, Unit::Minute)),
+];
+
 fn assert_rows(shown: &[Shown], rows: &[(f32, Told)], what: &str) {
     let tops: Vec<f32> = shown.iter().map(|shown| shown.top.round()).collect();
     let expected: Vec<f32> = rows.iter().map(|(top, _)| *top).collect();
@@ -86,6 +94,8 @@ fn the_rows_in_full_sight_are_read() {
     assert_rows(&shown, &SCROLLED, "the list scrolled");
     let shown = reader.list(&screen("list-attacks")).expect("the list");
     assert_rows(&shown, &ATTACKS, "a list of attacks");
+    let shown = reader.list(&screen("list-fresh")).expect("the list");
+    assert_rows(&shown, &FRESH, "the list right after a battle");
 }
 
 #[test]
@@ -107,6 +117,7 @@ fn other_window_sizes_read_the_same_or_nothing() {
         ("list", &TOP[..]),
         ("list-scrolled", &SCROLLED[..]),
         ("list-attacks", &ATTACKS[..]),
+        ("list-fresh", &FRESH[..]),
     ];
     for (name, rows) in lists {
         let screen = screen(name);

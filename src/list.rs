@@ -382,7 +382,8 @@ impl Reader {
     }
 
     /// The time the row whose top is at `top` tells: one or two digits, then "分前", "時間前"
-    /// or "日前". A count the unit never shows is not read.
+    /// or "日前" ("0分前" for a battle under a minute old, seen on 2026-11-18). A count the
+    /// unit never shows is not read.
     fn ago(&self, sheet: &Sheet, top: f32) -> Option<Ago> {
         let line = Line::of(sheet, top)?;
         let kanji = |letter: &GrayImage| {
@@ -399,22 +400,24 @@ impl Reader {
             '間' if kanji(&line.words(3)?[0])? == '時' => (Unit::Hour, 3),
             _ => return None,
         };
+        let digits = line.digits(letters)?;
         let mut count = 0;
-        for (at, digit) in line.digits(letters)?.iter().enumerate() {
+        for (at, digit) in digits.iter().enumerate() {
             let known = self.ago_digits.iter().map(|known| distance(digit, known));
             let digit = clear(known, LETTER_NEAR)? as u32;
-            // A number does not start with 0.
-            if at == 0 && digit == 0 {
+            // A number of two digits does not start with 0.
+            if at == 0 && digit == 0 && digits.len() > 1 {
                 return None;
             }
             count = count * 10 + digit;
         }
-        let most = match unit {
-            Unit::Minute => 59,
-            Unit::Hour => 23,
-            Unit::Day => 99,
+        // A battle under a minute old tells "0分前"; hours and days start at 1.
+        let counts = match unit {
+            Unit::Minute => 0..=59,
+            Unit::Hour => 1..=23,
+            Unit::Day => 1..=99,
         };
-        (count <= most).then_some(Ago { count, unit })
+        counts.contains(&count).then_some(Ago { count, unit })
     }
 }
 
