@@ -1,22 +1,34 @@
 //! Reading the battle record (戦闘履歴) from a screen: every part is read right or the
-//! record is not read at all. The fixture is a 2370×1333 window's record, blacked out
-//! around the parts read; other window sizes are drawn from it.
+//! record is not read at all. The fixtures are a 2370×1333 window's records, blacked out
+//! around the parts read; other window sizes are drawn from them.
 
-use bluearchive_rio::history::{Battle, Fighter, Party, Reader};
+use bluearchive_rio::history::{Battle, Fighter, Party, Plate, Reader};
 use image::{Rgb, RgbImage, imageops};
 
+/// A battle between two players with names.
 fn fixture() -> RgbImage {
     image::open("tests/fixtures/history.png")
         .expect("the fixture")
         .to_rgb8()
 }
 
-/// The fixture as a window `width` wide draws it.
-fn drawn_at(width: u32) -> RgbImage {
-    let fixture = fixture();
-    let height = (fixture.height() as f32 * width as f32 / fixture.width() as f32).round() as u32;
-    imageops::resize(&fixture, width, height, imageops::FilterType::Triangle)
+/// A battle the same attacker won against an anonymous player.
+fn anonymous() -> RgbImage {
+    image::open("tests/fixtures/anonymous.png")
+        .expect("the fixture")
+        .to_rgb8()
 }
+
+/// A screen as a window `width` wide draws it.
+fn drawn(screen: &RgbImage, width: u32) -> RgbImage {
+    let height = (screen.height() as f32 * width as f32 / screen.width() as f32).round() as u32;
+    imageops::resize(screen, width, height, imageops::FilterType::Triangle)
+}
+
+/// A Full HD screen, a window on one, the least width read and some between.
+const WIDTHS: [u32; 7] = [1500, 1520, 1600, 1760, 1830, 1920, 2222];
+/// The widths every record must read at.
+const READ: [u32; 2] = [1600, 1920];
 
 fn team(fighters: [(i64, u32); 6]) -> [Fighter; 6] {
     fighters.map(|(student, damage)| Fighter { student, damage })
@@ -52,6 +64,39 @@ fn assert_the_record(battle: &Battle, width: u32) {
     assert_eq!(battle.defender.team, defense(), "the defense, at {width}");
 }
 
+/// The record against the anonymous player: the same attack, and マリナ, ハスミ（水着）,
+/// ユウカ, トキ with ミチル（ドレス） and イロハ, who stand the other way round on the screen.
+fn assert_the_anonymous_record(battle: &Battle, width: u32) {
+    assert!(battle.attacker_won, "the attacker won, at {width}");
+    let attack = team([
+        (10005, 283_324),
+        (10037, 102_209),
+        (16010, 752_576),
+        (10124, 193_943),
+        (20016, 586_821),
+        (20053, 0),
+    ]);
+    let defense = team([
+        (10037, 158_553),
+        (10124, 301_369),
+        (13010, 173_623),
+        (10062, 433_794),
+        (20016, 736_063),
+        (20053, 0),
+    ]);
+    assert_eq!(battle.attacker.team, attack, "the attack, at {width}");
+    assert_eq!(battle.defender.team, defense, "the defense, at {width}");
+    assert!(
+        battle.defender.plate.is_none(),
+        "the \"?\" picture, at {width}"
+    );
+    assert!(battle.attacker.plate.is_some(), "a picture, at {width}");
+}
+
+fn plate(party: &Party) -> Plate {
+    party.plate.clone().expect("a name is drawn")
+}
+
 #[test]
 fn the_record_is_read_as_the_screen_shows_it() {
     let battle = Reader::new().read(&fixture()).expect("the record reads");
@@ -61,14 +106,13 @@ fn the_record_is_read_as_the_screen_shows_it() {
 #[test]
 fn other_window_sizes_read_the_same_or_nothing() {
     let reader = Reader::new();
-    // A Full HD screen, a window on one, and the least width read.
-    for width in [1500, 1520, 1600, 1760, 1830, 1920, 2222] {
-        let battle = reader.read(&drawn_at(width));
+    for width in WIDTHS {
+        let battle = reader.read(&drawn(&fixture(), width));
         if let Some(battle) = &battle {
             assert_the_record(battle, width);
         }
         assert!(
-            battle.is_some() || ![1600, 1920].contains(&width),
+            battle.is_some() || !READ.contains(&width),
             "the record reads at {width}"
         );
     }
@@ -78,8 +122,9 @@ fn other_window_sizes_read_the_same_or_nothing() {
 fn a_player_is_known_by_the_name_drawn() {
     let reader = Reader::new();
     let native = reader.read(&fixture()).expect("the record reads");
-    let smaller = reader.read(&drawn_at(1920)).expect("the record reads");
-    let plate = |party: &Party| party.plate.clone().expect("a name is drawn");
+    let smaller = reader
+        .read(&drawn(&fixture(), 1920))
+        .expect("the record reads");
     assert!(
         plate(&native.attacker).same(&plate(&smaller.attacker)),
         "the attacker at another window size"
@@ -92,6 +137,28 @@ fn a_player_is_known_by_the_name_drawn() {
         !plate(&native.attacker).same(&plate(&native.defender)),
         "the attacker is not the defender"
     );
+}
+
+#[test]
+fn an_anonymous_player_is_read_as_nobody() {
+    let reader = Reader::new();
+    let battle = reader.read(&anonymous()).expect("the record reads");
+    assert_the_anonymous_record(&battle, 2370);
+    let named = reader.read(&fixture()).expect("the record reads");
+    assert!(
+        plate(&battle.attacker).same(&plate(&named.attacker)),
+        "the attacker of the other record"
+    );
+    for width in WIDTHS {
+        let battle = reader.read(&drawn(&anonymous(), width));
+        if let Some(battle) = &battle {
+            assert_the_anonymous_record(battle, width);
+        }
+        assert!(
+            battle.is_some() || !READ.contains(&width),
+            "the record reads at {width}"
+        );
+    }
 }
 
 #[test]
@@ -110,7 +177,11 @@ fn a_screen_without_the_record_is_not_read() {
         None,
         "a black screen"
     );
-    assert_eq!(reader.read(&drawn_at(1280)), None, "too small a window");
+    assert_eq!(
+        reader.read(&drawn(&fixture(), 1280)),
+        None,
+        "too small a window"
+    );
 }
 
 #[test]

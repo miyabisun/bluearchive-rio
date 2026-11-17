@@ -67,6 +67,8 @@ const TITLE: Area = (1070.0, 190.0, 1300.0, 260.0);
 const ROLE: Area = (100.0, 335.0, 200.0, 435.0);
 /// "Win" or "Lose".
 const RESULT: Area = (215.0, 335.0, 440.0, 445.0);
+/// The middle of the player's picture: of an anonymous player's, the "?" in its circle.
+const ICON: Area = (507.0, 330.0, 607.0, 430.0);
 /// The line "Lv.90 name".
 const NAME: Area = (657.0, 312.0, 1085.0, 364.0);
 /// The middle of a side's first face, the step to the next, and the side of the square
@@ -82,6 +84,7 @@ const LABEL_HALF: f32 = 69.0;
 /// The sizes the parts are compared at.
 const TITLE_SIZE: (u32, u32) = (46, 14);
 const ROLE_SIZE: (u32, u32) = (16, 16);
+const ICON_SIZE: (u32, u32) = (16, 16);
 const DIGIT_SIZE: (u32, u32) = (10, 14);
 const FACE_SIZE: u32 = 24;
 const PLATE_HEIGHT: u32 = 32;
@@ -239,6 +242,12 @@ pub fn title_shape(frame: &RgbImage) -> Option<GrayImage> {
 pub fn role_shape(frame: &RgbImage, right: bool) -> Option<GrayImage> {
     let sheet = Sheet::of(frame)?;
     Some(shape(&sheet.crop(ROLE, shift(right))?, blue, ROLE_SIZE))
+}
+
+/// The shape of the middle of a side's player picture, for `make_refs` and the reader.
+pub fn icon_shape(frame: &RgbImage, right: bool) -> Option<GrayImage> {
+    let sheet = Sheet::of(frame)?;
+    Some(shape(&sheet.crop(ICON, shift(right))?, blue, ICON_SIZE))
 }
 
 fn shift(right: bool) -> f32 {
@@ -513,6 +522,10 @@ const DIGIT_NEAR: f32 = 25.0;
 /// the title was 0.989 like its reference at least, a role's picture 0.99 like its own
 /// and 0.63 like the other at most.
 const LIKE: f32 = 0.9;
+/// A player's picture this little like the "?" is another picture; one between is not read.
+/// Over two screens drawn at the same 291 widths, the "?" was 0.987 like its reference at
+/// least, and two players' own pictures 0.034 at most.
+const UNLIKE: f32 = 0.5;
 
 /// What a side of the record shows.
 struct Side {
@@ -526,6 +539,8 @@ pub struct Reader {
     title: GrayImage,
     /// The attacker's sword and the defender's shield.
     roles: [GrayImage; 2],
+    /// The "?" an anonymous player's picture shows.
+    anonymous: GrayImage,
     /// The digits 0 to 9.
     digits: Vec<GrayImage>,
     faces: Vec<Face>,
@@ -551,6 +566,7 @@ impl Reader {
                 reference(include_bytes!("../data/attack.png")),
                 reference(include_bytes!("../data/defense.png")),
             ],
+            anonymous: reference(include_bytes!("../data/anonymous.png")),
             digits: (0..10)
                 .map(|digit| {
                     imageops::crop_imm(&digits, digit * DIGIT_SIZE.0, 0, DIGIT_SIZE.0, DIGIT_SIZE.1)
@@ -605,11 +621,20 @@ impl Reader {
                 damage: self.damage(frame, right, slot)?,
             };
         }
+        // An anonymous player's name says nothing of who it is: the picture tells them.
+        let hidden = likeness(&icon_shape(frame, right)?, &self.anonymous);
+        let plate = if hidden >= LIKE {
+            None
+        } else if hidden <= UNLIKE {
+            Some(plate(&sheet.crop(NAME, shift(right))?, sheet.scale)?)
+        } else {
+            return None;
+        };
         Some(Side {
             attacks: attack > defense,
             won: won(&sheet.crop(RESULT, shift(right))?)?,
             party: Party {
-                plate: Some(plate(&sheet.crop(NAME, shift(right))?, sheet.scale)?),
+                plate,
                 team: in_order(team),
             },
         })

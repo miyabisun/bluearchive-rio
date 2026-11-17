@@ -1,11 +1,12 @@
-//! Cuts the references the reader compares a battle record with from a screen showing
-//! one, into `data/`: the title, the attacker's sword and the defender's shield, and the
-//! digits of the damage labels.
+//! Cuts the references the reader compares a battle record with from screens showing
+//! one, into `data/`: the title, the attacker's sword and the defender's shield, the
+//! digits of the damage labels, and the "?" picture of an anonymous player.
 //!   cargo run --example make_refs
 //! The screen is `tests/fixtures/history.png`: the attacker on the left, whose labels show
-//! every digit. The right side's labels are left out: the tests read them.
+//! every digit. The right side's labels are left out: the tests read them. The "?" is the
+//! defender's picture in `tests/fixtures/anonymous.png`.
 
-use bluearchive_rio::history::{digit_cells, role_shape, title_shape};
+use bluearchive_rio::history::{digit_cells, icon_shape, role_shape, title_shape};
 use image::{GrayImage, imageops};
 
 /// The widths the digits are drawn at: a smaller window blurs them, and the references
@@ -29,6 +30,10 @@ fn main() {
     save(title_shape(&screen), "title");
     save(role_shape(&screen, false), "attack");
     save(role_shape(&screen, true), "defense");
+    let hidden = image::open("tests/fixtures/anonymous.png")
+        .expect("the fixture")
+        .to_rgb8();
+    save(icon_shape(&hidden, true), "anonymous");
 
     // Each digit is the mean of the cells showing it.
     let mut sums: Vec<Vec<u32>> = vec![Vec::new(); 10];
