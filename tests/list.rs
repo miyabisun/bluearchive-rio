@@ -6,7 +6,7 @@
 
 use bluearchive_rio::{
     history::Reader,
-    list::{Row, Shown, Unit},
+    list::{self, Row, Shown, Unit},
 };
 use image::{RgbImage, imageops};
 
@@ -173,6 +173,38 @@ fn other_window_sizes_read_the_same_or_nothing() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn the_row_pressed_is_the_one_under_the_games_ring() {
+    // The game draws a white ring where a press lands. Here it lies on the second row's
+    // button, the list still lit.
+    let lit = screen("list-pressed");
+    let rows = Reader::new().list(&lit).expect("the list");
+    let tops: Vec<f32> = rows.iter().map(|row| row.top).collect();
+    assert_eq!(tops.len(), 3);
+    assert_eq!(list::pressed(&lit, &tops), Some(1));
+    // On the first row's, the list dimmed under the record that comes up: no row shows in
+    // full then, and the tops are those of the rows told before.
+    let dimmed = screen("list-pressed-dim");
+    assert_eq!(Reader::new().list(&dimmed), Some(vec![]));
+    assert_eq!(list::pressed(&dimmed, &[398.0, 572.0, 747.0]), Some(0));
+    assert_eq!(
+        list::pressed(&screen("list-six"), &[398.0, 572.0, 747.0]),
+        None,
+        "no press"
+    );
+    // The row cut by the list's top has no button in sight there.
+    assert_eq!(list::pressed(&lit, &[223.0, 398.0]), None);
+    for width in READ {
+        let (lit, dimmed) = (drawn(&lit, width), drawn(&dimmed, width));
+        assert_eq!(list::pressed(&lit, &tops), Some(1), "{width} wide");
+        assert_eq!(
+            list::pressed(&dimmed, &[398.0, 572.0, 747.0]),
+            Some(0),
+            "{width} wide"
+        );
     }
 }
 

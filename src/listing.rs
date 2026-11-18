@@ -134,70 +134,111 @@ pub fn align(kept: &[Listed], seen: &[Option<Sighting>], carried: &[Option<i64>]
     };
     let kept_beside = |at: usize| [above[at], below[at]];
     // Whether the row kept `at` may be the row in sight `row`, going by where it is kept:
-    // not in the run of a row told at another place than the list shows it; on a side
-    // where the list shows a row that read, the row kept there must be that row (`backed`
-    // if such a row not told yet says so too).
+    // not in the run of a row told at another place than the list shows it; and along its
+    // run up and down, as far as the list shows rows, each row kept is the row in sight
+    // there (`backed` if a row that read and is not told yet says so too).
     let fits = |told: &[Option<usize>], row: usize, at: usize| -> Option<bool> {
         // A row told that stands in the same run stands as far from it there as here.
         let apart = |(other, told): (usize, &Option<usize>)| {
             let (run, down) = stands[(*told)?];
             (run == stands[at].0).then_some((down - stands[at].1, other as isize - row as isize))
         };
-        if told
-            .iter()
-            .enumerate()
-            .filter_map(apart)
-            .any(|(kept, shown)| kept != shown)
-        {
+        let mut apart = told.iter().enumerate().filter_map(apart);
+        if apart.any(|(kept, shown)| kept != shown) {
             return None;
         }
         let mut backed = false;
-        for (shown, known) in beside(row).into_iter().zip(kept_beside(at)) {
-            let Some(shown) = shown.filter(|shown| seen[*shown].is_some()) else {
-                continue;
-            };
-            match (told[shown], known) {
-                (Some(told), Some(known)) if told != known => return None,
-                (None, Some(known)) if !same(shown, known) || told.contains(&Some(known)) => {
-                    return None;
+        for (step, next) in [(-1, &above), (1, &below)] {
+            let (mut shown, mut known) = (row as isize + step, next[at]);
+            let inside = |shown: isize| usize::try_from(shown).ok().filter(|at| *at < seen.len());
+            while let (Some(here), Some(at)) = (inside(shown), known) {
+                match (told[here], &seen[here]) {
+                    (Some(told), _) if told != at => return None,
+                    (None, Some(_)) if !same(here, at) || told.contains(&Some(at)) => return None,
+                    (Some(_), _) | (None, Some(_)) => backed = true,
+                    (None, None) => {}
                 }
-                (None, Some(_)) => backed = true,
-                _ => {}
+                (shown, known) = (shown + step, next[at]);
             }
         }
         Some(backed)
     };
-    let mut told: Vec<Option<usize>> = vec![None; seen.len()];
-    for (row, id) in carried.iter().enumerate().take(seen.len()) {
-        let known = id.and_then(|id| index.get(&id).copied());
-        if let Some(at) = known.filter(|at| same(row, *at) && !told.contains(&Some(*at))) {
+    // The rows of each run, and those of them that have a record: by the run's top row.
+    let mut runs: HashMap<usize, (usize, usize)> = HashMap::new();
+    for (at, (run, _)) in stands.iter().enumerate() {
+        let (records, rows) = runs.entry(*run).or_default();
+        *records += usize::from(kept[at].battle.is_some());
+        *rows += 1;
+    }
+    // Two rows kept that are one row of the list, kept twice: in two runs, telling the
+    // same fight at the same time (half the time the narrower of them allows, at least).
+    let twice = |a: usize, b: usize| {
+        let (one, other) = (kept[a].range, kept[b].range);
+        let shared = one.1.min(other.1) - one.0.max(other.0);
+        stands[a].0 != stands[b].0
+            && kept[a].fight == kept[b].fight
+            && shared * 2 >= (one.1 - one.0).min(other.1 - other.0)
+    };
+    // Of rows kept that are one row kept twice, the one of the run with more records, of
+    // the longer run, kept first; `None` if they are not all one row.
+    let one = |fitting: &[usize]| {
+        let first = *fitting.first()?;
+        let weight = |at: &&usize| (runs[&stands[**at].0], std::cmp::Reverse(**at));
+        let all = fitting.iter().all(|at| *at == first || twice(*at, first));
+        fitting.iter().max_by_key(weight).filter(|_| all).copied()
+    };
+    // Tells what the rows kept tell of the rows in sight, from the rows told already.
+    let tell = |told: &mut Vec<Option<usize>>| {
+        loop {
+            let found = {
+                let told: &[Option<usize>] = told;
+                // From a row told to the rows beside it.
+                let reached = (0..seen.len()).find_map(|row| {
+                    let at = told[row]?;
+                    let next = beside(row).into_iter().zip(kept_beside(at));
+                    next.flat_map(|(shown, known)| shown.zip(known))
+                        .find(|(shown, known)| {
+                            told[*shown].is_none()
+                                && same(*shown, *known)
+                                && !told.contains(&Some(*known))
+                        })
+                });
+                // A row that only one row kept can be, as the rows along its run say.
+                let backed = || {
+                    (0..seen.len()).find_map(|row| {
+                        let free = |at: &usize| same(row, *at) && !told.contains(&Some(*at));
+                        let backed = |at: &usize| fits(told, row, *at) == Some(true);
+                        let fitting = (0..kept.len()).filter(free).filter(backed);
+                        let fitting: Vec<usize> = fitting.collect();
+                        Some((row, one(&fitting).filter(|_| told[row].is_none())?))
+                    })
+                };
+                reached.or_else(backed)
+            };
+            let Some((row, at)) = found else {
+                break;
+            };
             told[row] = Some(at);
         }
-    }
-    loop {
-        // From a row told to the rows beside it.
-        let reached = (0..seen.len()).find_map(|row| {
-            let at = told[row]?;
-            let next = beside(row).into_iter().zip(kept_beside(at));
-            next.flat_map(|(shown, known)| shown.zip(known))
-                .find(|(shown, known)| {
-                    told[*shown].is_none() && same(*shown, *known) && !told.contains(&Some(*known))
-                })
-        });
-        // A row that only one row kept can be, as the rows beside both say.
-        let backed = || {
-            (0..seen.len()).find_map(|row| {
-                let free = |at: &usize| same(row, *at) && !told.contains(&Some(*at));
-                let backed = |at: &usize| fits(&told, row, *at) == Some(true);
-                let mut fitting = (0..kept.len()).filter(free).filter(backed);
-                let only = fitting.next().filter(|_| told[row].is_none())?;
-                fitting.next().is_none().then_some((row, only))
-            })
-        };
-        let Some((row, at)) = reached.or_else(backed) else {
-            break;
-        };
-        told[row] = Some(at);
+    };
+    // What the rows kept tell by themselves stands, if they tell every row that read: what
+    // was carried may be off where rows that tell the same stand side by side. Else, the
+    // rows carried are those rows, and the rows kept tell the rest.
+    let mut told: Vec<Option<usize>> = vec![None; seen.len()];
+    tell(&mut told);
+    if told
+        .iter()
+        .zip(&seen)
+        .any(|(told, seen)| told.is_none() && seen.is_some())
+    {
+        told = vec![None; seen.len()];
+        for (row, id) in carried.iter().enumerate().take(seen.len()) {
+            let known = id.and_then(|id| index.get(&id).copied());
+            if let Some(at) = known.filter(|at| same(row, *at) && !told.contains(&Some(*at))) {
+                told[row] = Some(at);
+            }
+        }
+        tell(&mut told);
     }
     // The rest, from the last up: a new battle stands above the older ones like it.
     let mut matches: Vec<Match> = told
@@ -227,6 +268,8 @@ pub fn align(kept: &[Listed], seen: &[Option<Sighting>], carried: &[Option<i64>]
                 .max_by_key(|at| (shared(at), *at))
                 .into_iter()
                 .collect();
+        } else if let Some(one) = one(&fitting) {
+            fitting = vec![one];
         }
         matches[row] = match fitting[..] {
             [] => Match::New,
@@ -248,15 +291,16 @@ pub fn align(kept: &[Listed], seen: &[Option<Sighting>], carried: &[Option<i64>]
     matches
 }
 
-/// How far the list moved between two frames: `by` if every row of `now` is the row `by`
-/// further down in `before` (`same` tells two readings of one row), going by two rows read
-/// in both, or by all there are of fewer. `None` if the frames share too little: the
-/// list jumped, or it is another list.
-pub fn shift<T>(
+/// The moves of the list between two frames that their rows allow, the least first: `by`
+/// where every row of `now` is the row `by` further down in `before` (`same` tells two
+/// readings of one row), going by two rows read in both, or by all there are of fewer. None
+/// if the frames share too little: the list jumped, or it is another list. Several where
+/// the rows both frames show tell the same: such rows do not tell how far the list moved.
+pub fn shifts<T>(
     before: &[Option<T>],
     now: &[Option<T>],
     same: impl Fn(&T, &T) -> bool,
-) -> Option<isize> {
+) -> Vec<isize> {
     let read = |rows: &[Option<T>]| rows.iter().flatten().count();
     let needed = read(before).min(read(now)).min(2);
     let fits = |by: &isize| {
@@ -271,12 +315,59 @@ pub fn shift<T>(
         }
         alike >= needed
     };
-    // The least move that fits: rows that tell the same may stand side by side.
     let far = before.len().max(now.len()) as isize;
-    (0..far)
-        .flat_map(|by| [by, -by])
-        .find(fits)
-        .filter(|_| needed > 0)
+    let moves = (0..far).flat_map(|by| [by, -by]).skip(1).filter(fits);
+    moves.filter(|_| needed > 0).collect()
+}
+
+/// A line of the list's picture: how bright its parts are, from the left (see
+/// `list::picture`).
+pub type Band = [u8; 12];
+
+/// How unlike two pictures of the list are if the list moved `down` lines down the screen
+/// between them: the mean difference of the lines both show, `None` if they share fewer
+/// than `SHARED`.
+pub fn unlike(before: &[Band], now: &[Band], down: f32) -> Option<f32> {
+    let down = down.round() as isize;
+    let pairs = now.iter().enumerate().filter_map(|(at, now)| {
+        let before = before.get(usize::try_from(at as isize - down).ok()?)?;
+        Some(
+            before
+                .iter()
+                .zip(now)
+                .map(|(a, b)| u32::from(a.abs_diff(*b))),
+        )
+    });
+    let (mut sum, mut count) = (0u32, 0u32);
+    for pair in pairs {
+        sum += pair.sum::<u32>();
+        count += 1;
+    }
+    (count >= SHARED).then(|| sum as f32 / (count * 12) as f32)
+}
+
+/// Two pictures compare over this many lines at least: a row's height.
+const SHARED: u32 = 165;
+/// A move's pictures are clearly more alike than another's at this much of its unlikeness.
+const CLEARLY: f32 = 0.6;
+
+/// Which of the moves the rows allow (each with how far down it takes the rows) the list
+/// made: the only one; of several, the one whose pictures are clearly more alike than any
+/// other's (the rows cut by the list's edges are in them, and tell where rows in full sight
+/// do not). `None` where the pictures do not tell either.
+pub fn moved(moves: &[(isize, f32)], before: &[Band], now: &[Band]) -> Option<isize> {
+    if let [(only, _)] = moves {
+        return Some(*only);
+    }
+    let mut seen: Vec<(f32, isize)> = moves
+        .iter()
+        .filter_map(|(by, down)| Some((unlike(before, now, *down)?, *by)))
+        .collect();
+    seen.sort_by(|a, b| a.0.total_cmp(&b.0));
+    match seen[..] {
+        [(least, by), (next, _), ..] if least <= next * CLEARLY && next > 0.0 => Some(by),
+        _ => None,
+    }
 }
 
 /// Whether the list stood still between two frames though a row reads otherwise: the rows
@@ -369,6 +460,9 @@ impl Up {
 pub enum Pointed {
     /// The row in full sight at this index.
     Row(usize),
+    /// The row at this index, by the ring the game draws where a press lands: the press
+    /// that opened the record, whatever the pointer is over.
+    Pressed(usize),
     /// The game, but none of the rows in full sight.
     Elsewhere,
     /// Not known: the pointer is not over the game.
@@ -400,11 +494,17 @@ pub struct Told {
 
 /// The row a record was opened from: the rows the list showed last (`None` for a row not
 /// told), what the pointer was over then, the fight the record shows and the battle's
-/// number. Of the rows that tell the record's fight: the one under the pointer; or else the
-/// one that has this record already; or else the first that has none. A touch moves no
-/// pointer, so the pointer only chooses among rows that tell the same; a row that has
-/// another record is taken only from under the pointer.
+/// number. The row the press lay on, where the game's ring showed it, if it tells the
+/// record's fight, and no other. Without the ring, of the rows that tell the record's
+/// fight: the one under the pointer; or else the one that has this record already; or else
+/// the first that has none. A touch moves no pointer, so the pointer only chooses among
+/// rows that tell the same; a row that has another record is taken only from under the
+/// pointer.
 pub fn opened(rows: &[Option<Told>], pointed: Pointed, fight: Fight, battle: i64) -> Option<i64> {
+    if let Pointed::Pressed(at) = pointed {
+        let pressed = rows.get(at)?.as_ref().filter(|row| row.fight == fight);
+        return pressed.map(|row| row.id);
+    }
     let told = rows
         .iter()
         .enumerate()
@@ -421,8 +521,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        Fight, Listed, Match, Pointed, Shows, Sighting, Told, Up, align, narrowed, opened, pointed,
-        shift, still,
+        Band, Fight, Listed, Match, Pointed, Shows, Sighting, Told, Up, align, moved, narrowed,
+        opened, pointed, shifts, still, unlike,
     };
 
     /// A fight against the player `opponent`: a defense won.
@@ -656,10 +756,63 @@ mod tests {
             fresh(&kept, &[seen(1, 9000), seen(2, 8000), None]),
             [Kept(0), Kept(1), Unsure(None)]
         );
-        // Nothing is told across it.
+        // The rows on either side of it tell each other.
         assert_eq!(
             fresh(&kept, &[seen(1, 9000), None, seen(3, 7000)]),
-            [Likely(0), Unsure(None), Likely(2)]
+            [Kept(0), Unsure(None), Kept(2)]
+        );
+    }
+
+    #[test]
+    fn rows_side_by_side_are_two_kept_only_where_the_rows_beyond_them_fit_too() {
+        // The rows of the players 5, 6 and 7 were kept; the list shows 5, 6 and 8: other
+        // rows (the players 5 and 6 fought again).
+        let kept = kept(&[&[(5, 9000), (6, 8990), (7, 8980)]]);
+        assert_eq!(
+            fresh(&kept, &[seen(5, 9000), seen(6, 8990), seen(8, 8980)]),
+            [New, New, New]
+        );
+    }
+
+    #[test]
+    fn rows_the_rows_kept_tell_are_not_told_otherwise_by_what_was_carried() {
+        // Seen on 2026-11-18: the player 3 beaten three times, between two other rows.
+        let kept = kept(&[&[(6, 9100), (3, 9000), (3, 9000), (3, 9000), (7, 8000)]]);
+        let rows = [seen(3, 9000), seen(3, 9000), seen(3, 9000)];
+        assert_eq!(fresh(&kept, &rows), [Kept(1), Kept(2), Kept(3)]);
+        assert_eq!(
+            align(&kept, &rows, &[Some(102), Some(103), None]),
+            [Kept(1), Kept(2), Kept(3)],
+            "carried one off, the third would be a fourth such row"
+        );
+        // Two of the three may be either two: there, what was carried tells.
+        assert_eq!(
+            fresh(&kept, &rows[..2]),
+            [Unsure(Some(false)), Unsure(Some(false))]
+        );
+        assert_eq!(
+            align(&kept, &rows[..2], &[Some(102), Some(103)]),
+            [Kept(2), Kept(3)]
+        );
+    }
+
+    #[test]
+    fn a_row_kept_twice_is_the_one_of_the_run_with_more_records() {
+        // Seen on 2026-11-18: rows told one off were kept anew, and two runs tell the same
+        // rows at the same time.
+        let mut twice = kept(&[
+            &[(4, 9000), (5, 8000), (6, 7000)],
+            &[(4, 9000), (5, 8000), (6, 7000), (3, 6000)],
+        ]);
+        twice[5].battle = Some(6);
+        let rows = [seen(4, 9000), seen(5, 8000), seen(6, 7000)];
+        assert_eq!(fresh(&twice, &rows), [Kept(3), Kept(4), Kept(5)]);
+        assert_eq!(fresh(&twice, &rows[..1]), [Likely(3)], "alone in sight too");
+        // Rows that tell the same at another time are other rows: either may be in sight.
+        let other = kept(&[&[(4, 9000), (5, 8000)], &[(4, 9050), (5, 8050)]]);
+        assert_eq!(
+            fresh(&other, &[seen(4, 9020), seen(5, 8020)]),
+            [Unsure(Some(false)), Unsure(Some(false))]
         );
     }
 
@@ -701,25 +854,62 @@ mod tests {
     fn the_list_moves_by_the_rows_two_frames_share() {
         let same = |a: &u8, b: &u8| a == b;
         let rows = |rows: &[u8]| rows.iter().map(|row| Some(*row)).collect::<Vec<_>>();
-        let moved = |before: &[u8], now: &[u8]| shift(&rows(before), &rows(now), same);
-        assert_eq!(moved(&[1, 2, 3], &[1, 2, 3]), Some(0));
-        assert_eq!(moved(&[1, 2, 3], &[2, 3, 4]), Some(1));
-        assert_eq!(moved(&[2, 3, 4], &[1, 2, 3]), Some(-1));
-        assert_eq!(moved(&[1, 2, 3], &[2, 3]), Some(1), "a row left full sight");
-        assert_eq!(moved(&[2, 3], &[2, 3, 4]), Some(0), "a row came into it");
-        assert_eq!(moved(&[1, 2, 3], &[3, 4, 5]), None, "one row is too little");
-        assert_eq!(moved(&[1, 2, 3], &[4, 5, 6]), None);
-        assert_eq!(moved(&[1], &[1]), Some(0), "a list of one row");
-        assert_eq!(moved(&[], &[1]), None);
+        let moves = |before: &[u8], now: &[u8]| shifts(&rows(before), &rows(now), same);
+        assert_eq!(moves(&[1, 2, 3], &[1, 2, 3]), [0]);
+        assert_eq!(moves(&[1, 2, 3], &[2, 3, 4]), [1]);
+        assert_eq!(moves(&[2, 3, 4], &[1, 2, 3]), [-1]);
+        assert_eq!(moves(&[1, 2, 3], &[2, 3]), [1], "a row left full sight");
+        assert_eq!(moves(&[2, 3], &[2, 3, 4]), [0], "a row came into it");
+        assert!(
+            moves(&[1, 2, 3], &[3, 4, 5]).is_empty(),
+            "one row is too little"
+        );
+        assert!(moves(&[1, 2, 3], &[4, 5, 6]).is_empty());
+        assert_eq!(moves(&[1], &[1]), [0], "a list of one row");
+        assert!(moves(&[], &[1]).is_empty());
         // Twins: the rows beside them tell how far.
-        assert_eq!(moved(&[7, 7, 3], &[7, 3, 4]), Some(1));
-        assert_eq!(moved(&[7, 7, 7], &[7, 7, 7]), Some(0), "the least move");
+        assert_eq!(moves(&[7, 7, 3], &[7, 3, 4]), [1]);
+        // Rows that tell the same and no other in sight do not tell how far. Seen on
+        // 2026-11-18: two of three such rows, then all three, were taken for no move, and
+        // the rows were told one off.
+        assert_eq!(moves(&[7, 7, 7], &[7, 7, 7]), [0, 1, -1]);
+        assert_eq!(moves(&[7, 7], &[7, 7, 7]), [0, -1]);
         // A row that did not read in one of the frames is no row against it.
         assert_eq!(
-            shift(&[Some(1), None, Some(3)], &rows(&[1, 2, 3]), same),
-            Some(0)
+            shifts(&[Some(1), None, Some(3)], &rows(&[1, 2, 3]), same),
+            [0]
         );
-        assert_eq!(shift(&[Some(1), None], &rows(&[1, 2]), same), Some(0));
+        assert_eq!(shifts(&[Some(1), None], &rows(&[1, 2]), same), [0]);
+    }
+
+    /// The picture of a list scrolled `down` lines: a row is 175 lines, 165 as bright as
+    /// its number says and 10 white ones.
+    fn picture(rows: &[u8], down: usize) -> Vec<Band> {
+        let line = |at: usize| match at % 175 {
+            165.. => [255; 12],
+            _ => [rows[at / 175]; 12],
+        };
+        (down..down + 662).map(line).collect()
+    }
+
+    #[test]
+    fn of_the_moves_the_rows_allow_the_pictures_tell_the_one() {
+        // Three rows that tell the same (70) between others. The list showed the second and
+        // the third in full, and moved 100 lines down the screen: all three show now. By
+        // the rows, it moved 100 lines down or 75 up.
+        let rows = [10, 70, 70, 70, 20, 30, 40];
+        let (before, now) = (picture(&rows, 250), picture(&rows, 150));
+        assert_eq!(unlike(&before, &now, 100.0), Some(0.0));
+        assert!(unlike(&before, &now, -75.0).is_some_and(|unlike| unlike > 5.0));
+        assert_eq!(unlike(&before, &now, 600.0), None, "too little shared");
+        assert_eq!(moved(&[(0, -75.0), (-1, 100.0)], &before, &now), Some(-1));
+        // Among rows that all tell the same, the pictures tell no more than the rows.
+        let rows = [70; 7];
+        let (before, now) = (picture(&rows, 250), picture(&rows, 150));
+        assert_eq!(moved(&[(0, -75.0), (-1, 100.0)], &before, &now), None);
+        // One move allowed is the move; none is none.
+        assert_eq!(moved(&[(1, 30.0)], &[], &[]), Some(1));
+        assert_eq!(moved(&[], &before, &now), None);
     }
 
     #[test]
@@ -884,6 +1074,22 @@ mod tests {
         assert_eq!(opened(&read, Pointed::Unknown, fight(1), 7), None);
         assert_eq!(opened(&read, Pointed::Row(0), fight(1), 7), Some(11));
         assert_eq!(opened(&read, Pointed::Unknown, fight(1), 5), Some(11));
+    }
+
+    #[test]
+    fn a_record_is_the_row_the_press_lay_on() {
+        let twins = [told(11, 1, None), told(12, 1, None), None];
+        assert_eq!(opened(&twins, Pointed::Pressed(1), fight(1), 7), Some(12));
+        assert_eq!(
+            opened(&twins, Pointed::Pressed(2), fight(1), 7),
+            None,
+            "a row not told: no other row is the record's"
+        );
+        assert_eq!(
+            opened(&twins, Pointed::Pressed(0), fight(2), 7),
+            None,
+            "the row tells another fight"
+        );
     }
 
     #[test]

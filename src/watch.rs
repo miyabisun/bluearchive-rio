@@ -12,7 +12,7 @@ use std::{
 use crate::{
     history::Plate,
     list::{self, ROW_ACROSS, ROW_TALL, Row, Shown},
-    listing::{self, Fight, Pointed, Told},
+    listing::{self, Band, Fight, Pointed, Told},
     opponent::Front,
     store::{Counsel, Kept, Store},
 };
@@ -75,6 +75,8 @@ pub struct Listing {
     known: Vec<Option<Told>>,
     told: Option<(Instant, Vec<Option<Told>>, Vec<f32>)>,
     over: Pointed,
+    picture: Vec<Band>,
+    pressed: Option<(Instant, f32)>,
 }
 
 impl Listing {
@@ -93,6 +95,7 @@ impl Listing {
         &mut self,
         store: &Store,
         rows: &[Shown],
+        picture: &[Band],
         since: Option<i64>,
         clock: i64,
         now: Instant,
@@ -106,8 +109,28 @@ impl Listing {
             std::mem::take(&mut self.before),
             std::mem::take(&mut self.known),
         );
+        // How far the list moved: by the rows both frames show; where those tell the same
+        // (several moves fit them), it stood if they kept their tops, or else by the
+        // pictures, which show the rows cut by the list's edges too.
         let stood = || listing::still((&self.tops, &tops), &before, &read, Row::same);
-        let moved = listing::shift(&before, &read, Row::same).or_else(|| stood().then_some(0));
+        let down = |by: isize| {
+            let both = (0..tops.len()).filter_map(|row| {
+                let before = self.tops.get(usize::try_from(row as isize + by).ok()?)?;
+                Some(tops[row] - before)
+            });
+            let (count, sum) = both.fold((0, 0.0), |(count, sum), down| (count + 1, sum + down));
+            (by, sum / count.max(1) as f32)
+        };
+        let moves: Vec<(isize, f32)> = listing::shifts(&before, &read, Row::same)
+            .into_iter()
+            .map(down)
+            .collect();
+        let moved = match moves[..] {
+            [(only, _)] => Some(only),
+            _ if stood() => Some(0),
+            _ => listing::moved(&moves, &self.picture, picture),
+        };
+        self.picture = picture.to_vec();
         // The row of the frame before that a row of this one is, and the row as both
         // frames read it.
         let earlier = |row: usize| {
@@ -174,6 +197,19 @@ impl Listing {
         }
     }
 
+    /// The tops of the rows last told, those the list's edges cut among them.
+    pub fn tops(&self) -> &[f32] {
+        self.told.as_ref().map_or(&[], |(_, _, tops)| tops)
+    }
+
+    /// The row of those last told that a press landed on in a frame read at `now` (see
+    /// `list::pressed`), if the frame shows one.
+    pub fn press(&mut self, row: Option<usize>, now: Instant) {
+        if let Some(top) = row.and_then(|row| self.tops().get(row).copied()) {
+            self.pressed = Some((now, top));
+        }
+    }
+
     /// Where the pointer is on the measured screen (`None` off the game): which of the
     /// rows last told it is over.
     pub fn point(&mut self, at: Option<(f32, f32)>) {
@@ -187,7 +223,20 @@ impl Listing {
     pub fn opened(&self, shown: Instant, fight: Fight, battle: i64) -> Option<i64> {
         let (seen, rows, _) = self.told.as_ref()?;
         (shown.duration_since(*seen) <= OPENING)
-            .then(|| listing::opened(rows, self.over, fight, battle))?
+            .then(|| listing::opened(rows, self.pointed(shown), fight, battle))?
+    }
+
+    /// What tells the row a record that first showed at `shown` was opened from: the press
+    /// the game drew its ring for not long before, on a row that stands where it stood
+    /// then; or else the pointer.
+    fn pointed(&self, shown: Instant) -> Pointed {
+        let lately = |(at, _): &(Instant, f32)| shown.saturating_duration_since(*at) <= OPENING;
+        let row = |(_, top): (Instant, f32)| {
+            let near = |row: &f32| (row - top).abs() <= 2.0;
+            self.tops().iter().position(near)
+        };
+        let pressed = self.pressed.filter(lately).and_then(row);
+        pressed.map_or(self.over, Pointed::Pressed)
     }
 
     /// What the list told last, in a line for the trail: for each row from the top its
@@ -205,7 +254,7 @@ impl Listing {
         };
         let rows = self.told.iter().flat_map(|(_, rows, _)| rows).map(row);
         let rows: Vec<String> = rows.collect();
-        let over = format!(" pointer {:?}", self.over);
+        let over = format!(" pointer {:?}", self.pointed(Instant::now()));
         format!(
             "rows [{}]{}",
             rows.join(" "),
@@ -432,7 +481,8 @@ fn run(
         }
         if let Some(rows) = &listed {
             screen = Some(Screen::List);
-            let told = listing.see(&store, rows, since, clock(), now);
+            let picture = list::picture(frame).unwrap_or_default();
+            let told = listing.see(&store, rows, &picture, since, clock(), now);
             if let Some(read) = told.map_err(records)? {
                 marks = guide::for_list(&read, since.is_some());
                 let list = listing.trail(false);
@@ -440,6 +490,11 @@ fn run(
             }
         } else {
             listing.miss(recorded);
+        }
+        // The ring the game draws where a press lands, while the list shows (dimmed under a
+        // record coming up as well).
+        if listed.is_some() {
+            listing.press(list::pressed(frame, listing.tops()), now);
         }
         // The row the pointer is over: asked while the list shows (dimmed under a record
         // coming up as well) and as a record first shows, when the pointer still lies where
@@ -513,7 +568,7 @@ mod tests {
     use crate::{
         history::{Battle, Fighter, Party, Plate},
         list::{Ago, Row, Shown, Unit},
-        listing::Fight,
+        listing::{Band, Fight},
         store::Store,
     };
 
@@ -573,22 +628,24 @@ mod tests {
         let rows = [shown(398.0, 5, 1), shown(572.0, 7, 9)];
         // The list comes up: told once two frames read the same, no record read yet.
         assert_eq!(
-            listing.see(&store, &rows, Some(1000), 1000, start).unwrap(),
+            listing
+                .see(&store, &rows, &[], Some(1000), 1000, start)
+                .unwrap(),
             None,
             "one frame is not enough"
         );
-        let told = listing.see(&store, &rows, Some(1000), 1000, after(100));
+        let told = listing.see(&store, &rows, &[], Some(1000), 1000, after(100));
         assert_eq!(told.unwrap(), Some(vec![(398.0, false), (572.0, false)]));
         // The first row's button is pressed. The record comes up over the list, which dims:
         // a frame reads its rows as they are not, then for some frames it shows no row in
         // full.
         listing.point(Some((1750.0, 480.0)));
         let faint = [shown(398.0, 2, 3), shown(572.0, 3, 4)];
-        let told = listing.see(&store, &faint, Some(1000), 1000, after(150));
+        let told = listing.see(&store, &faint, &[], Some(1000), 1000, after(150));
         assert_eq!(told.unwrap(), None, "nothing is told of it");
         listing.point(Some((1750.0, 480.0)));
         for frame in 2..5 {
-            let dimmed = listing.see(&store, &[], Some(1000), 1000, after(frame * 100));
+            let dimmed = listing.see(&store, &[], &[], Some(1000), 1000, after(frame * 100));
             assert_eq!(dimmed.unwrap(), None, "nothing to tell");
             listing.point(Some((1750.0, 480.0)));
         }
@@ -610,9 +667,9 @@ mod tests {
         // Back on the list, the row tells that its record is read.
         store.link(first, battle.id).unwrap();
         listing
-            .see(&store, &rows, Some(1000), 1002, after(2000))
+            .see(&store, &rows, &[], Some(1000), 1002, after(2000))
             .unwrap();
-        let told = listing.see(&store, &rows, Some(1000), 1002, after(2100));
+        let told = listing.see(&store, &rows, &[], Some(1000), 1002, after(2100));
         assert_eq!(told.unwrap(), Some(vec![(398.0, true), (572.0, false)]));
     }
 
@@ -625,7 +682,9 @@ mod tests {
         let mut see = |listing: &mut Listing, rows: &[Shown]| {
             frame += 1;
             let now = start + Duration::from_millis(frame * 100);
-            listing.see(&store, rows, Some(1000), 1000, now).unwrap()
+            listing
+                .see(&store, rows, &[], Some(1000), 1000, now)
+                .unwrap()
         };
         // Rows from the tops down: the names of so many strokes, as many minutes ago.
         let tops = [516.0, 691.0, 866.0];
@@ -674,8 +733,10 @@ mod tests {
         let after = |millis: u64| start + Duration::from_millis(millis);
         let mut listing = Listing::default();
         let rows = [shown(398.0, 5, 1), shown(572.0, 7, 9)];
-        listing.see(&store, &rows, Some(1000), 1000, start).unwrap();
-        let told = listing.see(&store, &rows, Some(1000), 1000, after(100));
+        listing
+            .see(&store, &rows, &[], Some(1000), 1000, start)
+            .unwrap();
+        let told = listing.see(&store, &rows, &[], Some(1000), 1000, after(100));
         assert_eq!(told.unwrap().map(|told| told.len()), Some(2));
         // The ring a press draws lies over the first row: it does not read, then reads as
         // another name.
@@ -686,11 +747,11 @@ mod tests {
             },
             shown(572.0, 7, 9),
         ];
-        let told = listing.see(&store, &pressed, Some(1000), 1000, after(200));
+        let told = listing.see(&store, &pressed, &[], Some(1000), 1000, after(200));
         assert_eq!(told.unwrap(), Some(vec![(398.0, false), (572.0, false)]));
         let pressed = [shown(398.0, 6, 1), shown(572.0, 7, 9)];
         for frame in 3..5 {
-            let told = listing.see(&store, &pressed, Some(1000), 1000, after(frame * 100));
+            let told = listing.see(&store, &pressed, &[], Some(1000), 1000, after(frame * 100));
             assert_eq!(told.unwrap(), Some(vec![(398.0, false), (572.0, false)]));
         }
         assert_eq!(store.listed(0).unwrap().len(), 2, "no row is made of it");
@@ -791,6 +852,22 @@ mod tests {
         list.iter().enumerate().filter_map(row).collect()
     }
 
+    /// The picture of a list scrolled `down` pixels (see `list::picture`): a row's lines
+    /// are as bright as its fight says, the lines between two rows white.
+    fn drawn(list: &[Fought], down: f32) -> Vec<Band> {
+        let line = |line: usize| {
+            let at = line as f32 + 387.0 - 396.0 + down;
+            let row = list.get((at / 174.7).floor() as usize);
+            match row.filter(|_| at >= 0.0 && at.rem_euclid(174.7) < 165.0) {
+                Some(&(name, attacked, won, _)) => {
+                    [(name * 37 + u32::from(attacked) * 101 + u32::from(won) * 53) as u8; 12]
+                }
+                None => [255; 12],
+            }
+        };
+        (0..662).map(line).collect()
+    }
+
     /// Shows a list that comes up `later` seconds after the first look, scrolled frame by
     /// frame as `scroll` says: whether the record of each row in the last frame is read.
     fn look(
@@ -806,8 +883,10 @@ mod tests {
         for (frame, down) in scroll.enumerate() {
             let now = start + Duration::from_millis(frame as u64 * 100);
             let (since, clock) = (FIRST + later, FIRST + later + frame as i64 / 10);
-            let rows = sight(list, later, down);
-            told = listing.see(store, &rows, Some(since), clock, now).unwrap();
+            let (rows, picture) = (sight(list, later, down), drawn(list, down));
+            told = listing
+                .see(store, &rows, &picture, Some(since), clock, now)
+                .unwrap();
         }
         told.iter().flatten().map(|(_, read)| *read).collect()
     }
@@ -930,5 +1009,95 @@ mod tests {
         // The lower one's button is pressed.
         listing.point(Some((1750.0, tops[2] + 80.0)));
         assert_eq!(listing.opened(now, fight, 1), Some(twins[1]));
+    }
+
+    /// A list with three rows that tell the same: the player 3 beaten three times a day ago
+    /// (seen on 2026-11-18).
+    const THRICE: [Fought; 8] = [
+        (1, true, true, 4 * HOUR),
+        (2, false, false, 22 * HOUR),
+        (3, false, true, DAY + 100),
+        (3, false, true, DAY + 200),
+        (3, false, true, DAY + 300),
+        (4, false, false, DAY + 400),
+        (5, true, true, DAY + 500),
+        (6, true, true, DAY + 600),
+    ];
+
+    #[test]
+    fn rows_that_tell_the_same_keep_their_places_as_the_list_moves() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut listing = Listing::default();
+        // Down slowly, back up faster, down again a hundred pixels a frame: through the
+        // places where only two of the three show in full, and no other row.
+        let top = [0.0; 3].into_iter();
+        let scroll = top
+            .chain(scrolled(0.0, 800.0, 25.0))
+            .chain(scrolled(800.0, 0.0, 60.0))
+            .chain(scrolled(0.0, 800.0, 100.0));
+        look(&mut listing, &store, &THRICE, 0, scroll);
+        assert_eq!(runs(&store), [fights(&store, &THRICE)], "each row once");
+        // Left where the second and the third show in full, the first cut by the list's
+        // top: a press on the third opens the third's record, wherever the pointer is.
+        look(
+            &mut listing,
+            &store,
+            &THRICE,
+            0,
+            scrolled(800.0, 375.0, 25.0),
+        );
+        let thrice: Vec<i64> = store.listed(0).unwrap()[2..5]
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        let fight = fights(&store, &THRICE)[2];
+        let tops = listing.tops().to_vec();
+        assert_eq!(
+            tops.len(),
+            4,
+            "the first of the three (cut), two in full, the row under"
+        );
+        let now = Instant::now();
+        listing.point(Some((1750.0, tops[0] + 100.0)));
+        listing.press(Some(2), now);
+        assert_eq!(listing.opened(now, fight, 1), Some(thrice[2]));
+        // A press somewhere else since (the list did not move) is the press that counts.
+        listing.press(Some(1), now);
+        assert_eq!(listing.opened(now, fight, 1), Some(thrice[1]));
+        // The list moved since the press: the press is of no row there now.
+        listing.point(None);
+        look(
+            &mut listing,
+            &store,
+            &THRICE,
+            0,
+            scrolled(375.0, 350.0, 25.0),
+        );
+        assert_eq!(
+            listing.opened(now, fight, 1),
+            Some(thrice[0]),
+            "the first without a record"
+        );
+    }
+
+    #[test]
+    fn two_rows_that_tell_the_same_then_three_are_not_told_one_off() {
+        // Seen on 2026-11-18: the second and the third of the three in full sight, then the
+        // list a hundred pixels down the screen and all three. By the rows, it had not
+        // moved; the third was kept as a fourth such row, and the rows under it cut off.
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut listing = Listing::default();
+        let top = [0.0; 3].into_iter();
+        let scroll = top
+            .chain(scrolled(0.0, 800.0, 25.0))
+            .chain(scrolled(800.0, 375.0, 25.0));
+        look(
+            &mut listing,
+            &store,
+            &THRICE,
+            0,
+            scroll.chain([275.0, 275.0]),
+        );
+        assert_eq!(runs(&store), [fights(&store, &THRICE)]);
     }
 }

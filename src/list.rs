@@ -10,6 +10,7 @@ use crate::history::{
     Area, ICON_SIZE, INKED, LIKE, Plate, ROLE_SIZE, Reader, Sheet, TITLE_SIZE, UNLIKE, blue, clear,
     distance, ink, likeness, plate, shape, won,
 };
+use crate::listing::Band;
 
 /// The unit a row tells a battle's time in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +116,76 @@ pub fn cut(tops: &[f32]) -> (Option<f32>, Option<f32>) {
         (SIGHT.1 - below - BUTTON.1 >= PRESSED).then_some(below),
     )
 }
+
+/// The face of the button "履歴", inside its slanted edges, in the row: the game's blue and
+/// the dark letters, nothing white, but for the ring the game draws where a press lands.
+const FACE: Area = (1665.0, 34.0, 1845.0, 130.0);
+/// The ring whitens this much of a face at least (measured on 2026-11-18: 189 to 786 of a
+/// face's 17280 pixels on four presses, on a list lit and dimmed; not one pixel on 45
+/// frames without a press).
+const RING: f32 = 0.004;
+/// The ring's white: every colour this bright at least.
+const RING_WHITE: u8 = 235;
+
+/// The row a press landed on: of the rows whose tops are `tops` (those the list's edges
+/// cut among them, see `cut`), the one whose button shows the ring. `None` with no ring,
+/// or with two: the ring is the game's, drawn whatever pressed, a pointer or a finger.
+pub fn pressed(frame: &RgbImage, tops: &[f32]) -> Option<usize> {
+    let sheet = Sheet::of(frame)?;
+    let whole = (FACE.2 - FACE.0) * (FACE.3 - FACE.1) * sheet.scale * sheet.scale;
+    let ringed = |top: &&f32| {
+        let (left, up, right, down) = part(FACE, **top);
+        let face = sheet.crop((left, up.max(SIGHT.0), right, down.min(SIGHT.1)), 0.0);
+        let ring = |pixel: &&Rgb<u8>| pixel.0.into_iter().min().unwrap_or(0) >= RING_WHITE;
+        let white = face.map_or(0, |face| face.pixels().filter(ring).count());
+        white as f32 >= RING * whole
+    };
+    let mut ringed = tops.iter().enumerate().filter(|(_, top)| ringed(top));
+    let (first, _) = ringed.next()?;
+    ringed.next().is_none().then_some(first)
+}
+
+/// The list's picture, for telling how far it moved between two frames (see
+/// `listing::moved`): for every line of the measured screen the list shows its rows in, how
+/// bright its twelve parts are, from the rows' left edge to the buttons. The rows the
+/// list's edges cut are in it.
+pub fn picture(frame: &RgbImage) -> Option<Vec<Band>> {
+    let sheet = Sheet::of(frame)?;
+    let (left, top) = sheet.spot((ROW_ACROSS.0, SIGHT.0));
+    let (right, bottom) = sheet.spot((BUTTON.0, SIGHT.1));
+    if left < 0.0 || top < 0.0 || right > frame.width() as f32 || bottom > frame.height() as f32 {
+        return None;
+    }
+    let wide = (right - left) / 12.0;
+    // Every other pixel of a line's part, in green: the parts are wide.
+    let part = |y: u32, part: usize| {
+        let (from, to) = (left + part as f32 * wide, left + (part + 1) as f32 * wide);
+        let pixels = (from as u32..to as u32).step_by(2);
+        let (count, sum) = pixels.fold((0, 0), |(count, sum), x| {
+            (count + 1, sum + u32::from(frame.get_pixel(x, y).0[1]))
+        });
+        sum / count.max(1)
+    };
+    let lines = (SIGHT.1 - SIGHT.0) as usize;
+    let sharp: Vec<[u32; 12]> = (0..lines)
+        .map(|line| {
+            let y = (top + (line as f32 + 0.5) * sheet.scale) as u32;
+            std::array::from_fn(|at| part(y.min(frame.height() - 1), at))
+        })
+        .collect();
+    // Evened over `EVEN` lines: a letter's edge falls on either side of a line as the list
+    // moves by less than one, a row's picture does not.
+    let even = |line: usize| {
+        let near = &sharp[line.saturating_sub(EVEN / 2)..(line + EVEN / 2 + 1).min(lines)];
+        std::array::from_fn(|at| {
+            (near.iter().map(|line| line[at]).sum::<u32>() / near.len() as u32) as u8
+        })
+    };
+    Some((0..lines).map(even).collect())
+}
+
+/// The lines a line of the list's picture is evened over.
+const EVEN: usize = 5;
 
 /// The parts of a row, down from its top. "Win" or "Lose":
 const RESULT: Area = (495.0, 8.0, 700.0, 102.0);
