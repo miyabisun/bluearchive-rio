@@ -1,10 +1,16 @@
 //! The rows of the game's list of battle records as Rio keeps them: telling a row seen again
 //! from a new one. A row tells who fought as what and who won, and its time only roughly
-//! ("2時間前"); the same two players may fight twice within a minute, so two rows may tell
-//! the same. What tells them apart is where they stand: the list runs from the newest
-//! battle down, and the rows in sight stand side by side in it.
+//! ("3日前"): the same two players may fight twice within a minute and again the day after,
+//! so many rows tell the same. What tells them apart is the rows beside them. The list runs
+//! from the newest battle down and nothing ever comes between two of its rows, so two rows
+//! once seen side by side stand side by side for good: Rio keeps for a row the row seen
+//! right above it (`Listed::above`), and takes a row in sight for a row kept only where the
+//! rows beside it say the same.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 /// What a row tells of a battle that stays as it is: whether the user attacked and won,
 /// and the opponent (the player's number; `None` for an anonymous one).
@@ -23,12 +29,12 @@ pub struct Sighting {
     pub range: (i64, i64),
 }
 
-/// A row kept: where it stands in the list (a larger `place` is a newer battle), and the
-/// record read of its battle, once its record was opened.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// A row kept: the row seen right above it in the list (`None` where none was seen there
+/// yet), and the record read of its battle, once its record was opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Listed {
     pub id: i64,
-    pub place: f64,
+    pub above: Option<i64>,
     pub fight: Fight,
     pub range: (i64, i64),
     pub battle: Option<i64>,
@@ -37,98 +43,263 @@ pub struct Listed {
 /// Which row kept a row seen is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Match {
-    /// The row kept at this index.
+    /// The row kept at this index: the rows beside it say so, or it was told so a frame ago.
     Kept(usize),
+    /// Likely the row kept at this index: it alone tells so, and nothing beside it tells
+    /// either way. Not sure enough to say which rows stand beside it.
+    Likely(usize),
     /// A row not kept yet.
     New,
-    /// Not known: the row did not read, or it may be either of two rows kept.
-    Unsure,
+    /// Not known: the row did not read, or it may be either of several rows kept. Whether
+    /// its record was read, where all of those say the same.
+    Unsure(Option<bool>),
+}
+
+/// What a row in sight was told to be: the row kept, where one is told (surely or likely),
+/// and whether its record was read, where that is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Sight {
+    pub row: Option<Told>,
+    pub read: Option<bool>,
+}
+
+/// What a frame's rows were told to be, and the rows kept that stand right above the first
+/// of them and right under the last, where those are surely known: the list's edges cut
+/// them, and their buttons may show still.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Sights {
+    pub rows: Vec<Sight>,
+    pub above: Option<Told>,
+    pub below: Option<Told>,
 }
 
 /// Two ranges of one battle's time may miss each other by this much: a row read a moment
 /// before the minute turns.
 const SLACK: i64 = 60;
 
-/// Which of the rows kept (`kept`, the newest first) each row in sight is (`seen`, from the
-/// top; `None` for a row that did not read).
-pub fn align(kept: &[Listed], seen: &[Option<Sighting>]) -> Vec<Match> {
-    // Where two rows kept fit a row equally well, it is told only if it is the same row
-    // whichever of them is preferred.
-    let (upper, lower) = (fitted(kept, seen, false), fitted(kept, seen, true));
-    seen.iter()
-        .enumerate()
-        .map(|(at, row)| match (row, upper[at], lower[at]) {
-            (Some(_), one, other) if one == other => one.map_or(Match::New, Match::Kept),
-            _ => Match::Unsure,
-        })
-        .collect()
+/// Whether a row seen may be a row kept: the same fight, at a time both allow.
+fn like(seen: &Sighting, kept: &Listed) -> bool {
+    seen.fight == kept.fight
+        && seen.range.0 <= kept.range.1 + SLACK
+        && kept.range.0 <= seen.range.1 + SLACK
 }
 
-/// How well the rows in sight fit the rows kept: the rows told, then the rows kept that
-/// are passed over between two told (but for a row in sight that did not read), then the
-/// rows in sight left new between two told. The rows in sight stand side by side in the
-/// list, so the rows kept that they are stand side by side too, and a new row stands
-/// rather above or under them than among them.
-type Fit = (i32, i32, i32);
-/// A row in sight told as a row kept: the two's indices.
-type Pair = (usize, usize);
-/// The best fit that ends with a pair, and the pair it follows.
-type Ending = (Fit, Option<Pair>);
-/// What a fit is preferred by: how good it is, then where its last pair lies.
-type Rank = (Fit, i64, usize);
-
-/// The row kept each row in sight is, of the best fit: of two fits as good, the one that
-/// ends at the row kept further down if `lower`, and at the row in sight further down.
-fn fitted(kept: &[Listed], seen: &[Option<Sighting>], lower: bool) -> Vec<Option<usize>> {
-    let same = |row: &Sighting, kept: &Listed| {
-        row.fight == kept.fight
-            && row.range.0 <= kept.range.1 + SLACK
-            && kept.range.0 <= row.range.1 + SLACK
-    };
-    let prefer = |at: usize| if lower { at as i64 } else { -(at as i64) };
-    // The best fit that ends with the row in sight `row` told as the row kept `at`.
-    let mut fits: Vec<Vec<Option<Ending>>> = vec![vec![None; kept.len()]; seen.len()];
-    let mut best: Option<(Rank, Pair)> = None;
-    for row in 0..seen.len() {
-        let Some(sighting) = &seen[row] else {
-            continue;
-        };
-        for at in 0..kept.len() {
-            if !same(sighting, &kept[at]) {
-                continue;
-            }
-            let mut fit: Ending = ((1, 0, 0), None);
-            let mut rank: Rank = ((1, 0, 0), i64::MIN, 0);
-            for before in 0..row {
-                let unread = seen[before + 1..row].iter().filter(|row| row.is_none());
-                let unread = unread.count() as i32;
-                let new = (row - before - 1) as i32 - unread;
-                for (above, ending) in fits[before].iter().enumerate().take(at) {
-                    let Some(((told, passed, among), _)) = ending else {
-                        continue;
-                    };
-                    let over = ((at - above - 1) as i32 - unread).max(0);
-                    let next = (told + 1, passed - over, among - new);
-                    if (next, prefer(above), before) > rank {
-                        rank = (next, prefer(above), before);
-                        fit = (next, Some((before, above)));
-                    }
-                }
-            }
-            fits[row][at] = Some(fit);
-            let rank = (fit.0, prefer(at), row);
-            if best.is_none_or(|(known, _)| rank > known) {
-                best = Some((rank, (row, at)));
-            }
+/// Which of the rows kept each row in sight is (`seen`, from the top; `None` for a row that
+/// did not read). `carried` tells the rows that were told a frame ago (see `shift`): the
+/// numbers of the rows kept they are.
+///
+/// A row told a frame ago is that row (one that tells another fight now is not told: the
+/// list does not change, so its reading is off). From a row told, the row kept beside it is the row
+/// in sight beside it, where that tells the same. Of the rest, a row is a row kept if the
+/// rows kept beside that one are what the list shows beside it: two rows side by side that
+/// are two kept side by side are sure (if they could be no other two), a row with nothing
+/// kept beside it to go by is only likely, but for a row kept alone.
+pub fn align(kept: &[Listed], seen: &[Option<Sighting>], carried: &[Option<i64>]) -> Vec<Match> {
+    let index: HashMap<i64, usize> = kept
+        .iter()
+        .enumerate()
+        .map(|(at, row)| (row.id, at))
+        .collect();
+    let above: Vec<Option<usize>> = kept
+        .iter()
+        .map(|row| row.above.and_then(|id| index.get(&id).copied()))
+        .collect();
+    let mut below = vec![None; kept.len()];
+    for (at, above) in above.iter().enumerate() {
+        if let Some(above) = above {
+            below[*above] = Some(at);
         }
     }
-    let mut told = vec![None; seen.len()];
-    let mut pair = best.map(|(_, pair)| pair);
-    while let Some((row, at)) = pair {
-        told[row] = Some(at);
-        pair = fits[row][at].and_then(|(_, before)| before);
+    // The run of rows side by side a row kept stands in (its top row), and how far down.
+    let stand = |at: usize| {
+        let up = std::iter::successors(Some(at), |at| above[*at]).take(kept.len());
+        up.enumerate()
+            .last()
+            .map_or((at, 0), |(down, top)| (top, down as isize))
+    };
+    let stands: Vec<(usize, isize)> = (0..kept.len()).map(stand).collect();
+    // A row told a frame ago that tells another fight now: its reading is off.
+    let off = |(row, id): (&Option<Sighting>, &Option<i64>)| {
+        let known = id.and_then(|id| index.get(&id)).map(|at| &kept[*at]);
+        row.filter(|row| known.is_none_or(|known| like(row, known)))
+    };
+    let seen: Vec<Option<Sighting>> = seen.iter().zip(carried).map(off).collect();
+    let same = |row: usize, at: usize| seen[row].as_ref().is_some_and(|row| like(row, &kept[at]));
+    // The rows in sight above and under a row, and the rows kept above and under one.
+    let beside = |row: usize| {
+        [
+            row.checked_sub(1),
+            Some(row + 1).filter(|row| *row < seen.len()),
+        ]
+    };
+    let kept_beside = |at: usize| [above[at], below[at]];
+    // Whether the row kept `at` may be the row in sight `row`, going by where it is kept:
+    // not in the run of a row told at another place than the list shows it; on a side
+    // where the list shows a row that read, the row kept there must be that row (`backed`
+    // if such a row not told yet says so too).
+    let fits = |told: &[Option<usize>], row: usize, at: usize| -> Option<bool> {
+        // A row told that stands in the same run stands as far from it there as here.
+        let apart = |(other, told): (usize, &Option<usize>)| {
+            let (run, down) = stands[(*told)?];
+            (run == stands[at].0).then_some((down - stands[at].1, other as isize - row as isize))
+        };
+        if told
+            .iter()
+            .enumerate()
+            .filter_map(apart)
+            .any(|(kept, shown)| kept != shown)
+        {
+            return None;
+        }
+        let mut backed = false;
+        for (shown, known) in beside(row).into_iter().zip(kept_beside(at)) {
+            let Some(shown) = shown.filter(|shown| seen[*shown].is_some()) else {
+                continue;
+            };
+            match (told[shown], known) {
+                (Some(told), Some(known)) if told != known => return None,
+                (None, Some(known)) if !same(shown, known) || told.contains(&Some(known)) => {
+                    return None;
+                }
+                (None, Some(_)) => backed = true,
+                _ => {}
+            }
+        }
+        Some(backed)
+    };
+    let mut told: Vec<Option<usize>> = vec![None; seen.len()];
+    for (row, id) in carried.iter().enumerate().take(seen.len()) {
+        let known = id.and_then(|id| index.get(&id).copied());
+        if let Some(at) = known.filter(|at| same(row, *at) && !told.contains(&Some(*at))) {
+            told[row] = Some(at);
+        }
     }
-    told
+    loop {
+        // From a row told to the rows beside it.
+        let reached = (0..seen.len()).find_map(|row| {
+            let at = told[row]?;
+            let next = beside(row).into_iter().zip(kept_beside(at));
+            next.flat_map(|(shown, known)| shown.zip(known))
+                .find(|(shown, known)| {
+                    told[*shown].is_none() && same(*shown, *known) && !told.contains(&Some(*known))
+                })
+        });
+        // A row that only one row kept can be, as the rows beside both say.
+        let backed = || {
+            (0..seen.len()).find_map(|row| {
+                let free = |at: &usize| same(row, *at) && !told.contains(&Some(*at));
+                let backed = |at: &usize| fits(&told, row, *at) == Some(true);
+                let mut fitting = (0..kept.len()).filter(free).filter(backed);
+                let only = fitting.next().filter(|_| told[row].is_none())?;
+                fitting.next().is_none().then_some((row, only))
+            })
+        };
+        let Some((row, at)) = reached.or_else(backed) else {
+            break;
+        };
+        told[row] = Some(at);
+    }
+    // The rest, from the last up: a new battle stands above the older ones like it.
+    let mut matches: Vec<Match> = told
+        .iter()
+        .map(|told| told.map_or(Match::Unsure(None), Match::Kept))
+        .collect();
+    let mut taken: Vec<usize> = told.iter().flatten().copied().collect();
+    let alone = |at: usize| above[at].is_none() && below[at].is_none();
+    for row in (0..seen.len()).rev() {
+        let (None, Some(sighting)) = (told[row], &seen[row]) else {
+            continue;
+        };
+        let free = |at: &usize| same(row, *at) && !taken.contains(at);
+        let mut fitting: Vec<usize> = (0..kept.len())
+            .filter(free)
+            .filter(|at| fits(&told, row, *at).is_some())
+            .collect();
+        // Of rows kept alone, nothing but the time tells one from another: the one whose
+        // time fits best, the one kept last of those.
+        let shared = |at: &usize| {
+            let (kept, seen) = (kept[*at].range, sighting.range);
+            kept.1.min(seen.1) - kept.0.max(seen.0)
+        };
+        if fitting.len() > 1 && fitting.iter().all(|at| alone(*at)) {
+            fitting = fitting
+                .into_iter()
+                .max_by_key(|at| (shared(at), *at))
+                .into_iter()
+                .collect();
+        }
+        matches[row] = match fitting[..] {
+            [] => Match::New,
+            [only] if alone(only) => {
+                told[row] = Some(only);
+                Match::Kept(only)
+            }
+            [only] => Match::Likely(only),
+            [first, ..] => {
+                let read = kept[first].battle.is_some();
+                let agreed = fitting.iter().all(|at| kept[*at].battle.is_some() == read);
+                Match::Unsure(agreed.then_some(read))
+            }
+        };
+        if let [only] = fitting[..] {
+            taken.push(only);
+        }
+    }
+    matches
+}
+
+/// How far the list moved between two frames: `by` if every row of `now` is the row `by`
+/// further down in `before` (`same` tells two readings of one row), going by two rows read
+/// in both, or by all there are of fewer. `None` if the frames share too little: the
+/// list jumped, or it is another list.
+pub fn shift<T>(
+    before: &[Option<T>],
+    now: &[Option<T>],
+    same: impl Fn(&T, &T) -> bool,
+) -> Option<isize> {
+    let read = |rows: &[Option<T>]| rows.iter().flatten().count();
+    let needed = read(before).min(read(now)).min(2);
+    let fits = |by: &isize| {
+        let mut alike = 0;
+        for (row, now) in now.iter().enumerate() {
+            let at = usize::try_from(row as isize + by).ok();
+            match (at.and_then(|at| before.get(at)), now) {
+                (Some(Some(before)), Some(now)) if same(before, now) => alike += 1,
+                (Some(Some(_)), Some(_)) => return false,
+                _ => {}
+            }
+        }
+        alike >= needed
+    };
+    // The least move that fits: rows that tell the same may stand side by side.
+    let far = before.len().max(now.len()) as isize;
+    (0..far)
+        .flat_map(|by| [by, -by])
+        .find(fits)
+        .filter(|_| needed > 0)
+}
+
+/// Whether the list stood still between two frames though a row reads otherwise: the rows
+/// at the same tops (`tops`: before and now, a pixel off at most), one of them alike at
+/// least and one not alike at most. A press draws a ring over the row pressed, and the row
+/// does not read, or reads otherwise, while the ring spreads.
+pub fn still<T>(
+    tops: (&[f32], &[f32]),
+    before: &[Option<T>],
+    now: &[Option<T>],
+    same: impl Fn(&T, &T) -> bool,
+) -> bool {
+    let level = |(before, now): (&f32, &f32)| (before - now).abs() <= 1.0;
+    let alike = |(before, now): (&Option<T>, &Option<T>)| match (before, now) {
+        (Some(before), Some(now)) => same(before, now),
+        _ => false,
+    };
+    let alike = before.iter().zip(now).filter(|pair| alike(*pair)).count();
+    tops.0.len() == tops.1.len()
+        && tops.0.iter().zip(tops.1).all(level)
+        && before.len() == now.len()
+        && alike >= 1
+        && alike + 1 >= now.len()
 }
 
 /// The range of a battle's time kept so far, narrowed by what a row tells of it now.
@@ -139,61 +310,6 @@ pub fn narrowed(kept: (i64, i64), seen: (i64, i64)) -> (i64, i64) {
     } else {
         kept
     }
-}
-
-/// Where the new rows among those in sight stand: a place for each `Match::New`, between
-/// the places of the rows kept around it; none for a new row whose place nothing tells.
-pub fn places(kept: &[Listed], seen: &[Option<Sighting>], matches: &[Match]) -> Vec<Option<f64>> {
-    let mut places = vec![None; seen.len()];
-    // The new rows from `from` up to `to`, spread between the places `above` and `under`.
-    let mut spread = |from: usize, to: usize, above: Option<f64>, under: Option<f64>| {
-        let new: Vec<usize> = (from..to).filter(|at| matches[*at] == Match::New).collect();
-        let count = new.len() as f64;
-        for (nth, at) in new.into_iter().enumerate() {
-            let nth = nth as f64 + 1.0;
-            places[at] = Some(match (above, under) {
-                (Some(above), Some(under)) => above - (above - under) * nth / (count + 1.0),
-                (None, Some(under)) => under + count - nth + 1.0,
-                (Some(above), None) => above - nth,
-                (None, None) => count - nth + 1.0,
-            });
-        }
-    };
-    let place = |at: usize| kept.get(at).map(|kept| kept.place);
-    let told: Vec<(usize, usize)> = matches
-        .iter()
-        .enumerate()
-        .filter_map(|(row, told)| match told {
-            Match::Kept(at) => Some((row, *at)),
-            _ => None,
-        })
-        .collect();
-    let (Some(&(first, top)), Some(&(last, bottom))) = (told.first(), told.last()) else {
-        // No row kept in sight: the rows stand where their times put them, if every row
-        // kept is surely newer than all of them or surely older. Among rows kept that may
-        // be as old (the rows of one day tell the same time), nothing in sight tells
-        // where they stand: they are left unplaced, to be kept once the list is scrolled
-        // over them and a row beside them.
-        let read = || seen.iter().flatten().map(|row| row.range);
-        let (Some(earliest), Some(latest)) = (
-            read().map(|range| range.0).min(),
-            read().map(|range| range.1).max(),
-        ) else {
-            return places;
-        };
-        let newer = kept.iter().take_while(|kept| kept.range.0 > latest).count();
-        if kept[newer..].iter().all(|kept| kept.range.1 < earliest) {
-            let above = newer.checked_sub(1).and_then(place);
-            spread(0, seen.len(), above, place(newer));
-        }
-        return places;
-    };
-    spread(0, first, top.checked_sub(1).and_then(place), place(top));
-    for pair in told.windows(2) {
-        spread(pair[0].0, pair[1].0, place(pair[0].1), place(pair[1].1));
-    }
-    spread(last, seen.len(), place(bottom), place(bottom + 1));
-    places
 }
 
 /// What a frame of the game shows, for telling how long the list has been up.
@@ -276,29 +392,28 @@ pub fn pointed(at: Option<(f32, f32)>, tops: &[f32], tall: f32, across: (f32, f3
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Told {
     pub id: i64,
+    /// Whether the row is surely this one (`Match::Kept`), or only likely.
+    pub sure: bool,
     pub fight: Fight,
     pub battle: Option<i64>,
 }
 
-/// The row a record was opened from: the rows in full sight when the list was last seen
-/// (`None` for a row not told), what the pointer was over then, the fight the record shows
-/// and the battle's number. `None` when no row is surely the record's: a record may be
-/// opened from a row cut by the list's edge, which is not read.
+/// The row a record was opened from: the rows the list showed last (`None` for a row not
+/// told), what the pointer was over then, the fight the record shows and the battle's
+/// number. Of the rows that tell the record's fight: the one under the pointer; or else the
+/// one that has this record already; or else the first that has none. A touch moves no
+/// pointer, so the pointer only chooses among rows that tell the same; a row that has
+/// another record is taken only from under the pointer.
 pub fn opened(rows: &[Option<Told>], pointed: Pointed, fight: Fight, battle: i64) -> Option<i64> {
-    let same = |row: &&Told| row.fight == fight;
-    match pointed {
-        Pointed::Row(at) => rows.get(at)?.as_ref().filter(same).map(|row| row.id),
-        Pointed::Elsewhere => None,
-        Pointed::Unknown => {
-            let like: Vec<&Told> = rows.iter().flatten().filter(same).collect();
-            let own = like.iter().find(|row| row.battle == Some(battle));
-            let free = like.iter().find(|row| row.battle.is_none());
-            match like[..] {
-                [only] => Some(only.id),
-                _ => own.or(free).map(|row| row.id),
-            }
-        }
-    }
+    let told = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(at, row)| Some((at, row.as_ref()?)));
+    let like: Vec<(usize, &Told)> = told.filter(|(_, row)| row.fight == fight).collect();
+    let pointed = like.iter().find(|(at, _)| pointed == Pointed::Row(*at));
+    let own = like.iter().find(|(_, row)| row.battle == Some(battle));
+    let free = like.iter().find(|(_, row)| row.battle.is_none());
+    pointed.or(own).or(free).map(|(_, row)| row.id)
 }
 
 #[cfg(test)]
@@ -306,8 +421,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        Fight, Listed, Match, Pointed, Shows, Sighting, Told, Up, align, narrowed, opened, places,
-        pointed,
+        Fight, Listed, Match, Pointed, Shows, Sighting, Told, Up, align, narrowed, opened, pointed,
+        shift, still,
     };
 
     /// A fight against the player `opponent`: a defense won.
@@ -327,53 +442,104 @@ mod tests {
         })
     }
 
-    /// The rows kept, the newest first: each an opponent and the end of its minute.
-    fn kept(rows: &[(i64, i64)]) -> Vec<Listed> {
-        rows.iter()
-            .enumerate()
-            .map(|(at, (opponent, time))| Listed {
-                id: 100 + at as i64,
-                place: (rows.len() - at) as f64,
-                fight: fight(*opponent),
-                range: (time - 60, *time),
-                battle: None,
-            })
-            .collect()
+    /// The rows kept, numbered from 100 on: runs of rows seen side by side, each from its
+    /// top, a row an opponent and the end of its minute.
+    fn kept(runs: &[&[(i64, i64)]]) -> Vec<Listed> {
+        let mut rows: Vec<Listed> = Vec::new();
+        for run in runs {
+            for (at, (opponent, time)) in run.iter().enumerate() {
+                let id = 100 + rows.len() as i64;
+                rows.push(Listed {
+                    id,
+                    above: (at > 0).then_some(id - 1),
+                    fight: fight(*opponent),
+                    range: (time - 60, *time),
+                    battle: None,
+                });
+            }
+        }
+        rows
     }
 
-    use Match::{Kept, New, Unsure};
+    /// The rows in sight told with none carried from a frame ago.
+    fn fresh(kept: &[Listed], seen: &[Option<Sighting>]) -> Vec<Match> {
+        align(kept, seen, &vec![None; seen.len()])
+    }
+
+    use Match::{Kept, Likely, New, Unsure};
 
     #[test]
     fn rows_never_seen_are_new() {
-        assert_eq!(align(&[], &[seen(1, 9000), seen(2, 8000)]), [New, New]);
+        assert_eq!(fresh(&[], &[seen(1, 9000), seen(2, 8000)]), [New, New]);
     }
 
     #[test]
-    fn rows_seen_again_are_the_rows_kept() {
-        let kept = kept(&[(1, 9000), (2, 8000), (3, 7000)]);
+    fn rows_side_by_side_are_the_rows_kept_side_by_side() {
+        let kept = kept(&[&[(1, 9000), (2, 8000), (3, 7000)]]);
         assert_eq!(
-            align(&kept, &[seen(1, 9000), seen(2, 8000), seen(3, 7000)]),
+            fresh(&kept, &[seen(1, 9000), seen(2, 8000), seen(3, 7000)]),
             [Kept(0), Kept(1), Kept(2)]
         );
         // The list scrolled: the rows further down.
         assert_eq!(
-            align(&kept, &[seen(2, 8000), seen(3, 7000)]),
+            fresh(&kept, &[seen(2, 8000), seen(3, 7000)]),
             [Kept(1), Kept(2)]
         );
         // A battle since: one more row on top.
         assert_eq!(
-            align(&kept, &[seen(4, 9900), seen(1, 9000), seen(2, 8000)]),
+            fresh(&kept, &[seen(4, 9900), seen(1, 9000), seen(2, 8000)]),
             [New, Kept(0), Kept(1)]
+        );
+        // Rows under the last kept.
+        assert_eq!(
+            fresh(&kept, &[seen(2, 8000), seen(3, 7000), seen(4, 6000)]),
+            [Kept(1), Kept(2), New]
         );
     }
 
     #[test]
-    fn a_row_is_told_by_its_fight_and_its_time() {
-        let kept = kept(&[(1, 9000)]);
-        assert_eq!(align(&kept, &[seen(2, 9000)]), [New], "another opponent");
-        assert_eq!(align(&kept, &[seen(1, 5000)]), [New], "another time");
+    fn a_row_alone_among_new_ones_is_only_likely() {
+        // Two battles since, and the row that was on top: it may be that row, or another
+        // battle against the same opponent.
+        let kept = kept(&[&[(1, 9000), (2, 8000)]]);
+        let rows = [seen(4, 9900), seen(5, 9800), seen(1, 9000)];
+        assert_eq!(fresh(&kept, &rows), [New, New, Likely(0)]);
+        // Told a frame ago, the rows above it are sure; it is as likely as it was.
+        let two = self::kept(&[&[(1, 9000), (2, 8000)], &[(4, 9900), (5, 9800)]]);
         assert_eq!(
-            align(&kept, &[seen(1, 9100)]),
+            align(&two, &rows, &[Some(102), Some(103), None]),
+            [Kept(2), Kept(3), Likely(0)]
+        );
+    }
+
+    #[test]
+    fn a_row_told_a_frame_ago_is_that_row() {
+        let kept = kept(&[&[(1, 9000), (2, 8000), (3, 7000)]]);
+        // The list moved on to the last row kept and rows never seen.
+        let rows = [seen(3, 7000), seen(4, 6000), seen(5, 5000)];
+        assert_eq!(fresh(&kept, &rows), [Likely(2), New, New]);
+        assert_eq!(
+            align(&kept, &rows, &[Some(102), None, None]),
+            [Kept(2), New, New]
+        );
+        // A row told a frame ago that tells another fight now is not told anew: the list
+        // does not change under Rio's eyes, so the reading is off (a press draws a ring
+        // over the row pressed).
+        assert_eq!(
+            align(&kept, &rows, &[Some(100), None, None]),
+            [Unsure(None), New, New]
+        );
+    }
+
+    #[test]
+    fn a_row_kept_alone_is_told_by_itself() {
+        // No row was ever seen beside it: there is nothing beside it to go by.
+        let one = kept(&[&[(1, 9000)]]);
+        assert_eq!(fresh(&one, &[seen(1, 9000)]), [Kept(0)]);
+        assert_eq!(fresh(&one, &[seen(2, 9000)]), [New], "another opponent");
+        assert_eq!(fresh(&one, &[seen(1, 5000)]), [New], "another time");
+        assert_eq!(
+            fresh(&one, &[seen(1, 9100)]),
             [Kept(0)],
             "a minute that turned as the row was read"
         );
@@ -384,58 +550,210 @@ mod tests {
             },
             range: (8940, 9000),
         });
-        assert_eq!(align(&kept, &[lost]), [New], "another winner");
+        assert_eq!(fresh(&one, &[lost]), [New], "another winner");
+        // The opponent beaten again within the minute: the newer battle stands on top.
+        assert_eq!(fresh(&one, &[seen(1, 9000), seen(1, 9000)]), [New, Kept(0)]);
+        // Two kept alone that tell the same: the one kept first stands on top.
+        let two = kept(&[&[(1, 9000)], &[(1, 9000)]]);
+        assert_eq!(
+            fresh(&two, &[seen(1, 9000), seen(1, 9000)]),
+            [Kept(0), Kept(1)]
+        );
+    }
+
+    #[test]
+    fn a_row_is_not_taken_for_one_of_another_day_whose_neighbours_differ() {
+        // Seen on 2026-11-18: the user fought the players 22 and 18 on two days running.
+        // The rows "4日前" were kept; the list, open for half an hour, then showed the rows
+        // "3日前", whose times reach those of the rows a day older.
+        let older: Vec<Listed> = [22, 18, 23]
+            .into_iter()
+            .enumerate()
+            .map(|(at, opponent)| Listed {
+                id: 100 + at as i64,
+                above: (at > 0).then(|| 99 + at as i64),
+                fight: fight(opponent),
+                range: (500_000 - 86400, 500_016),
+                battle: None,
+            })
+            .collect();
+        let day = |opponent| {
+            Some(Sighting {
+                fight: fight(opponent),
+                range: (500_000, 588_200),
+            })
+        };
+        let newer = [day(17), day(18), day(30)];
+        assert_eq!(fresh(&older, &newer), [New, New, New]);
+        // Kept alone, the older row would be taken for the newer: of two kept alone, the
+        // one whose time fits better is.
+        let alone = [
+            Listed {
+                above: None,
+                ..older[1]
+            },
+            Listed {
+                id: 200,
+                above: None,
+                fight: fight(18),
+                range: (500_000, 588_200),
+                battle: Some(7),
+            },
+        ];
+        assert_eq!(fresh(&alone, &newer[1..2]), [Kept(1)]);
     }
 
     #[test]
     fn two_rows_that_tell_the_same_are_told_by_the_rows_beside_them() {
         // The same opponent beaten twice within the minute, then another.
-        let twins = kept(&[(1, 9000), (1, 9000), (2, 8000)]);
+        let twins = kept(&[&[(1, 9000), (1, 9000), (2, 8000)]]);
         assert_eq!(
-            align(&twins, &[seen(1, 9000), seen(2, 8000)]),
+            fresh(&twins, &[seen(1, 9000), seen(2, 8000)]),
             [Kept(1), Kept(2)],
             "the one just above the row below"
         );
-        let twins = kept(&[(2, 9900), (1, 9000), (1, 9000)]);
         assert_eq!(
-            align(&twins, &[seen(2, 9900), seen(1, 9000)]),
+            fresh(&twins, &[seen(1, 9000), seen(1, 9000)]),
             [Kept(0), Kept(1)],
-            "the one just under the row above"
-        );
-        assert_eq!(
-            align(&twins, &[seen(1, 9000), seen(1, 9000)]),
-            [Kept(1), Kept(2)],
             "both in sight"
         );
         assert_eq!(
-            align(&twins, &[seen(1, 9000)]),
-            [Unsure],
-            "alone in sight, it may be either"
+            fresh(&twins, &[seen(1, 9000)]),
+            [Unsure(Some(false))],
+            "alone in sight, it may be either: neither was read"
         );
+        let twins = kept(&[&[(2, 9900), (1, 9000), (1, 9000)]]);
+        assert_eq!(
+            fresh(&twins, &[seen(2, 9900), seen(1, 9000)]),
+            [Kept(0), Kept(1)],
+            "the one just under the row above"
+        );
+    }
+
+    #[test]
+    fn a_row_that_may_be_either_of_two_is_read_where_both_are() {
+        let mut twins = kept(&[&[(1, 9000), (1, 9000), (2, 8000)]]);
+        twins[0].battle = Some(7);
+        assert_eq!(fresh(&twins, &[seen(1, 9000)]), [Unsure(None)]);
+        twins[1].battle = Some(8);
+        assert_eq!(fresh(&twins, &[seen(1, 9000)]), [Unsure(Some(true))]);
     }
 
     #[test]
     fn a_new_row_like_one_kept_stands_above_it() {
         // The opponent beaten again: the row kept is the older of the two.
-        let kept = kept(&[(1, 9000), (2, 8000)]);
+        let kept = kept(&[&[(1, 9000), (2, 8000)]]);
         assert_eq!(
-            align(&kept, &[seen(1, 9000), seen(1, 9000), seen(2, 8000)]),
+            fresh(&kept, &[seen(1, 9000), seen(1, 9000), seen(2, 8000)]),
             [New, Kept(0), Kept(1)]
-        );
-        // Without a row beside them to tell by, the newer battle is the new row still.
-        assert_eq!(
-            align(&kept[..1], &[seen(1, 9000), seen(1, 9000)]),
-            [New, Kept(0)]
         );
     }
 
     #[test]
     fn a_row_that_did_not_read_is_not_told() {
-        let kept = kept(&[(1, 9000), (2, 8000), (3, 7000)]);
+        let kept = kept(&[&[(1, 9000), (2, 8000), (3, 7000)]]);
         assert_eq!(
-            align(&kept, &[seen(1, 9000), None, seen(3, 7000)]),
-            [Kept(0), Unsure, Kept(2)]
+            fresh(&kept, &[seen(1, 9000), seen(2, 8000), None]),
+            [Kept(0), Kept(1), Unsure(None)]
         );
+        // Nothing is told across it.
+        assert_eq!(
+            fresh(&kept, &[seen(1, 9000), None, seen(3, 7000)]),
+            [Likely(0), Unsure(None), Likely(2)]
+        );
+    }
+
+    #[test]
+    fn two_runs_meet_where_a_row_of_the_one_was_told_a_frame_ago() {
+        let kept = kept(&[&[(1, 9000), (2, 8000)], &[(3, 7000), (4, 6000)]]);
+        let rows = [seen(2, 8000), seen(3, 7000), seen(4, 6000)];
+        assert_eq!(fresh(&kept, &rows), [Likely(1), Kept(2), Kept(3)]);
+        assert_eq!(
+            align(&kept, &rows, &[Some(101), None, None]),
+            [Kept(1), Kept(2), Kept(3)]
+        );
+    }
+
+    #[test]
+    fn a_row_is_not_the_row_kept_under_another_where_it_tells_another_fight() {
+        // The rows 1, 2, 3 were kept side by side, wrongly: the list shows 4 under 1.
+        let kept = kept(&[&[(1, 9000), (2, 8000), (3, 7000)]]);
+        let rows = [seen(1, 9000), seen(4, 8500)];
+        assert_eq!(align(&kept, &rows, &[Some(100), None]), [Kept(0), New]);
+        // With nothing carried, what was kept counts: the row above is not the row kept.
+        assert_eq!(fresh(&kept, &rows), [New, New]);
+    }
+
+    #[test]
+    fn a_row_is_not_a_row_kept_that_stands_elsewhere_in_the_run_of_a_row_told() {
+        // The players 5 and 6 fought a day ago and two days ago, in the same order. The rows
+        // of two days ago were kept under the row of player 7; the list moves up to the
+        // rows of a day ago, which stand above that row.
+        let kept = kept(&[&[(7, 9000), (5, 8990), (6, 8980)]]);
+        let rows = [seen(5, 9050), seen(6, 9040), seen(7, 9000)];
+        assert_eq!(
+            align(&kept, &rows, &[None, None, Some(100)]),
+            [New, New, Kept(0)]
+        );
+    }
+
+    #[test]
+    fn the_list_moves_by_the_rows_two_frames_share() {
+        let same = |a: &u8, b: &u8| a == b;
+        let rows = |rows: &[u8]| rows.iter().map(|row| Some(*row)).collect::<Vec<_>>();
+        let moved = |before: &[u8], now: &[u8]| shift(&rows(before), &rows(now), same);
+        assert_eq!(moved(&[1, 2, 3], &[1, 2, 3]), Some(0));
+        assert_eq!(moved(&[1, 2, 3], &[2, 3, 4]), Some(1));
+        assert_eq!(moved(&[2, 3, 4], &[1, 2, 3]), Some(-1));
+        assert_eq!(moved(&[1, 2, 3], &[2, 3]), Some(1), "a row left full sight");
+        assert_eq!(moved(&[2, 3], &[2, 3, 4]), Some(0), "a row came into it");
+        assert_eq!(moved(&[1, 2, 3], &[3, 4, 5]), None, "one row is too little");
+        assert_eq!(moved(&[1, 2, 3], &[4, 5, 6]), None);
+        assert_eq!(moved(&[1], &[1]), Some(0), "a list of one row");
+        assert_eq!(moved(&[], &[1]), None);
+        // Twins: the rows beside them tell how far.
+        assert_eq!(moved(&[7, 7, 3], &[7, 3, 4]), Some(1));
+        assert_eq!(moved(&[7, 7, 7], &[7, 7, 7]), Some(0), "the least move");
+        // A row that did not read in one of the frames is no row against it.
+        assert_eq!(
+            shift(&[Some(1), None, Some(3)], &rows(&[1, 2, 3]), same),
+            Some(0)
+        );
+        assert_eq!(shift(&[Some(1), None], &rows(&[1, 2]), same), Some(0));
+    }
+
+    #[test]
+    fn the_list_stands_still_where_its_rows_keep_their_tops() {
+        let same = |a: &u8, b: &u8| a == b;
+        let tops = [398.0, 572.0, 747.0];
+        let rows = [Some(1), Some(2), Some(3)];
+        let stood =
+            |tops_now: &[f32], now: &[Option<u8>]| still((&tops[..], tops_now), &rows, now, same);
+        assert!(
+            stood(&[398.4, 572.3, 747.0], &[Some(1), None, Some(3)]),
+            "the row pressed does not read"
+        );
+        assert!(
+            stood(&tops, &[Some(1), Some(9), Some(3)]),
+            "or reads otherwise"
+        );
+        assert!(
+            !stood(&tops, &[Some(1), Some(9), Some(8)]),
+            "two rows differ"
+        );
+        assert!(
+            !stood(&[393.0, 567.0, 742.0], &[Some(1), None, Some(3)]),
+            "it moved"
+        );
+        assert!(!stood(&tops[..2], &rows[..2]), "fewer rows");
+        assert!(!stood(&tops, &[None, None, None]), "no row to go by");
+        // Two rows in sight, the one pressed.
+        assert!(still(
+            (&tops[..2], &tops[..2]),
+            &rows[..2],
+            &[Some(1), Some(7)],
+            same
+        ));
     }
 
     #[test]
@@ -446,86 +764,6 @@ mod tests {
             narrowed((1000, 2000), (2030, 3000)),
             (1000, 2000),
             "ranges that miss each other narrow nothing"
-        );
-    }
-
-    #[test]
-    fn a_new_row_stands_between_the_rows_around_it() {
-        let rows = kept(&[(1, 9000), (2, 8000)]);
-        let place = |seen: &[Option<Sighting>]| places(&rows, seen, &align(&rows, seen));
-        // Places 2 and 1 are kept: a row on top stands above 2.
-        assert_eq!(place(&[seen(3, 9900), seen(1, 9000)]), [Some(3.0), None]);
-        assert_eq!(
-            place(&[seen(4, 9950), seen(3, 9900), seen(1, 9000)]),
-            [Some(4.0), Some(3.0), None],
-            "two on top, the upper the newer"
-        );
-        assert_eq!(
-            place(&[seen(1, 9000), seen(3, 8500), seen(2, 8000)]),
-            [None, Some(1.5), None],
-            "a row between two kept"
-        );
-        assert_eq!(
-            place(&[seen(2, 8000), seen(3, 7000), seen(4, 6000)]),
-            [None, Some(0.0), Some(-1.0)],
-            "rows under the last kept"
-        );
-        // With no row kept in sight, the rows stand where their time puts them.
-        assert_eq!(place(&[seen(3, 9900)]), [Some(3.0)], "newer than all");
-        assert_eq!(place(&[seen(3, 8500)]), [Some(1.5)], "between");
-        assert_eq!(place(&[seen(3, 7000)]), [Some(0.0)], "older than all");
-        assert_eq!(
-            places(
-                &[],
-                &[seen(1, 9000), seen(2, 8000)],
-                &[Match::New, Match::New]
-            ),
-            [Some(2.0), Some(1.0)],
-            "the first rows ever"
-        );
-    }
-
-    #[test]
-    fn a_new_row_is_not_placed_where_nothing_tells_its_place() {
-        // A row kept tells a day; the list scrolled far shows a row of the same day, and no
-        // row kept beside it: it may stand above the row kept or under it.
-        let day = |opponent, at: i64| {
-            Some(Sighting {
-                fight: fight(opponent),
-                range: (at - 86400, at),
-            })
-        };
-        let rows = vec![Listed {
-            id: 100,
-            place: 1.0,
-            fight: fight(1),
-            range: (500_000 - 86400, 500_000),
-            battle: None,
-        }];
-        let seen = [day(2, 500_030), day(3, 500_030)];
-        let matches = align(&rows, &seen);
-        assert_eq!(matches, [New, New]);
-        assert_eq!(places(&rows, &seen, &matches), [None, None]);
-        // Seen with the row kept beside them, they stand under it.
-        let seen = [day(1, 500_030), day(2, 500_030), day(3, 500_030)];
-        let matches = align(&rows, &seen);
-        assert_eq!(
-            places(&rows, &seen, &matches),
-            [None, Some(0.0), Some(-1.0)]
-        );
-        // Rows a day older than all kept stand under them, whatever is in sight.
-        let seen = [day(2, 400_000)];
-        assert_eq!(places(&rows, &seen, &align(&rows, &seen)), [Some(0.0)]);
-    }
-
-    #[test]
-    fn a_new_row_under_a_kept_one_stands_above_the_next_kept() {
-        // Places 3, 2, 1 kept; the list shows the first and a row never read under it.
-        let rows = kept(&[(1, 9000), (2, 8000), (3, 7000)]);
-        let seen = [seen(1, 9000), seen(4, 8500)];
-        assert_eq!(
-            places(&rows, &seen, &align(&rows, &seen)),
-            [None, Some(2.5)]
         );
     }
 
@@ -618,44 +856,34 @@ mod tests {
         );
         assert_eq!(over(None), Pointed::Unknown, "off the game");
     }
-
     fn told(id: i64, opponent: i64, battle: Option<i64>) -> Option<Told> {
         Some(Told {
             id,
+            sure: true,
             fight: fight(opponent),
             battle,
         })
     }
 
     #[test]
-    fn a_record_is_the_row_it_was_opened_from() {
+    fn a_record_is_the_row_that_tells_its_fight() {
         let rows = [told(11, 1, None), told(12, 2, None), None];
         assert_eq!(opened(&rows, Pointed::Row(1), fight(2), 7), Some(12));
-        assert_eq!(
-            opened(&rows, Pointed::Unknown, fight(2), 7),
-            Some(12),
-            "the one row that tells the same"
-        );
-        assert_eq!(
-            opened(&rows, Pointed::Row(0), fight(2), 7),
-            None,
-            "the pointer's row tells another fight"
-        );
-        assert_eq!(
-            opened(&rows, Pointed::Row(2), fight(2), 7),
-            None,
-            "the pointer's row was not told"
-        );
-        assert_eq!(
-            opened(&rows, Pointed::Elsewhere, fight(2), 7),
-            None,
-            "opened from a row cut by the list's edge"
-        );
+        assert_eq!(opened(&rows, Pointed::Unknown, fight(2), 7), Some(12));
+        // A touch moves no pointer: where the pointer lies says nothing against the row.
+        assert_eq!(opened(&rows, Pointed::Row(0), fight(2), 7), Some(12));
+        assert_eq!(opened(&rows, Pointed::Elsewhere, fight(2), 7), Some(12));
         assert_eq!(
             opened(&rows, Pointed::Unknown, fight(3), 7),
             None,
             "no such row"
         );
+        // A row that has another record is the record's only from under the pointer: the
+        // record may be of a row cut by the list's edge that tells the same.
+        let read = [told(11, 1, Some(5))];
+        assert_eq!(opened(&read, Pointed::Unknown, fight(1), 7), None);
+        assert_eq!(opened(&read, Pointed::Row(0), fight(1), 7), Some(11));
+        assert_eq!(opened(&read, Pointed::Unknown, fight(1), 5), Some(11));
     }
 
     #[test]

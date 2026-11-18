@@ -2,7 +2,8 @@
 //! shows: the battle records (`history`) in a database (`store`), told with the students of
 //! the SchaleDB snapshot, and the students held as Aoi wrote them (`aoi`). The list the
 //! records are opened from (`list`) tells roughly when each battle was: its rows are kept
-//! too (`listing`), and a record is the battle of the row it was opened from. Before a battle
+//! too (`listing`), and a record is the battle of the row it was opened from (what was told
+//! of them is written down, `trail`). Before a battle
 //! it reads what the opponent's dialog shows of the defense (`opponent`), to look up what
 //! stood behind it in the records; in the formation dialog (`formation`) it marks over the
 //! game (`guide`, `overlay`) the students of the attack that won most against that defense.
@@ -22,6 +23,7 @@ pub mod opponent;
 pub mod overlay;
 pub mod settings;
 pub mod store;
+pub mod trail;
 pub mod ui;
 pub mod update;
 pub mod view;

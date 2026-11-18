@@ -59,6 +59,19 @@ pub struct Row {
     pub ago: Ago,
 }
 
+impl Row {
+    /// Whether two frames read the same of a row: the names drawn the same (see
+    /// `history::Plate::same`).
+    pub fn same(&self, other: &Row) -> bool {
+        (self.attacked, self.won, self.ago) == (other.attacked, other.won, other.ago)
+            && match (&self.opponent, &other.opponent) {
+                (Some(name), Some(other)) => name.same(other),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
 /// A row in full sight: where its top lies on the measured screen, and what it tells when
 /// every part of it reads.
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +97,24 @@ const ROW_SLACK: f32 = 2.5;
 pub const ROW_ACROSS: (f32, f32) = (463.0, 1907.0);
 /// The button "履歴" that opens a row's record, in the row.
 pub const BUTTON: Area = (1625.0, 18.0, 1885.0, 146.0);
+/// From a row's top to the next row's.
+const ROW_STEP: f32 = 174.7;
+/// A button can be pressed where this much of its height shows.
+const PRESSED: f32 = 20.0;
+
+/// The rows the list's edges cut right above the first row in full sight and right under
+/// the last (their tops are `tops`), where enough of their buttons shows to be pressed:
+/// their tops.
+pub fn cut(tops: &[f32]) -> (Option<f32>, Option<f32>) {
+    let (Some(first), Some(last)) = (tops.first(), tops.last()) else {
+        return (None, None);
+    };
+    let (above, below) = (first - ROW_STEP, last + ROW_STEP);
+    (
+        (above + BUTTON.3 - SIGHT.0 >= PRESSED).then_some(above),
+        (SIGHT.1 - below - BUTTON.1 >= PRESSED).then_some(below),
+    )
+}
 
 /// The parts of a row, down from its top. "Win" or "Lose":
 const RESULT: Area = (495.0, 8.0, 700.0, 102.0);
@@ -421,7 +452,7 @@ impl Reader {
 
 #[cfg(test)]
 mod tests {
-    use super::{Ago, Unit, tops};
+    use super::{Ago, Unit, cut, tops};
     use crate::history::{Reader, Sheet};
 
     /// A fixture: a screen kept out of the repository (see `tests/list.rs`).
@@ -451,6 +482,20 @@ mod tests {
             listed.expect("a name").same(&recorded.expect("a name")),
             "one player on both screens"
         );
+    }
+
+    #[test]
+    fn a_row_cut_by_the_lists_edge_counts_while_its_button_shows() {
+        // Seen on 2026-11-18: the row above the first in full sight shows its lower two
+        // thirds, button and all; of the row under the last, a strip.
+        let (above, below) = cut(&[516.0, 691.0, 866.0]);
+        assert_eq!(above.map(f32::round), Some(341.0));
+        assert_eq!(below, None);
+        // The list at its top: nothing above the first row, half a row under the third.
+        let (above, below) = cut(&[396.0, 570.7, 745.4]);
+        assert_eq!(above, None);
+        assert_eq!(below.map(f32::round), Some(920.0));
+        assert_eq!(cut(&[]), (None, None));
     }
 
     fn column(runs: &[(usize, usize)], tall: usize) -> Vec<bool> {
