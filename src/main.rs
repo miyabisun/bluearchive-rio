@@ -18,7 +18,7 @@ use bluearchive_rio::{
     history::Reader,
     opponent::{self, Front},
     store::{Counsel, Kept, Player, Store},
-    students, view,
+    students, view, watch,
 };
 
 const USAGE: &str = "使い方:
@@ -109,7 +109,7 @@ fn foretell(front: &Front, counsel: &Counsel, names: &HashMap<i64, String>) -> S
         told.push_str(&format!(
             "\n  {}. D2 {second} / D3 {third} / D4 {fourth} （{}）",
             at + 1,
-            view::basis(likely)
+            view::basis(likely).join("、")
         ));
         if likely.attacks.is_empty() {
             told.push_str("\n     勝った攻撃は、まだ登録がありません");
@@ -191,7 +191,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                     None => println!("{path}: 対戦相手の画面を読めませんでした"),
                     Some(front) => {
                         let name = opponent::name(&screen);
-                        let counsel = store.counsel(&front, name.as_ref(), held.as_deref())?;
+                        let now = watch::clock();
+                        let counsel = store.counsel(&front, name.as_ref(), held.as_deref(), now)?;
                         println!("{path}: {}", foretell(&front, &counsel, &names));
                     }
                 }
@@ -239,7 +240,7 @@ mod tests {
 
     use bluearchive_rio::{
         opponent::Front,
-        store::{Counsel, Kept, Likely, Player, Tried},
+        store::{Counsel, Ground, Kept, Likely, Player, Tried},
     };
 
     use super::{describe, foretell};
@@ -267,13 +268,13 @@ mod tests {
             first: 7,
             specials: [5, 6],
         };
-        let likely = |rest, theirs, others: (u32, u32), attacks: Vec<Tried>| Likely {
+        let likely = |rest, ground, others, attacks: Vec<Tried>| Likely {
             rest,
-            theirs,
-            their_last: (theirs > 0).then(|| "2026-11-17 13:14:04".to_owned()),
-            others: others.0,
-            other_battles: others.1,
-            mine: 0,
+            ground,
+            their_last: (ground == Ground::Theirs).then(|| "2026-11-17".to_owned()),
+            others,
+            others_before: 0,
+            mine: false,
             attacks,
         };
         let won = Tried {
@@ -283,16 +284,16 @@ mod tests {
         };
         let counsel = Counsel {
             likely: vec![
-                likely([2, 9, 99], 1, (0, 0), vec![won]),
-                likely([2, 8, 9], 0, (2, 3), Vec::new()),
+                likely([2, 9, 99], Ground::Theirs, 0, vec![won]),
+                likely([2, 8, 9], Ground::Trend, 2, Vec::new()),
             ],
         };
         assert_eq!(
             foretell(&front, &counsel, &names()),
             "対戦相手の防衛: D1 アツコ | SP イロハ / SP ミチル（ドレス）
-  1. D2 マリナ / D3 イオリ / D4 生徒#99 （この相手 1戦（最後 11-17 13:14））
+  1. D2 マリナ / D3 イオリ / D4 生徒#99 （本人 11-17）
      3戦2勝 A1 ホシノ / A2 マリナ / A3 ヒビキ（応援団） / A4 ハスミ（水着） | SP イロハ / SP ミチル（ドレス）
-  2. D2 マリナ / D3 トキ / D4 イオリ （ほか 2人・3戦）
+  2. D2 マリナ / D3 トキ / D4 イオリ （ほか 2人）
      勝った攻撃は、まだ登録がありません"
         );
         let none = Counsel { likely: Vec::new() };

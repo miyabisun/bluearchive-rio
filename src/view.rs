@@ -3,7 +3,7 @@
 //! window.
 
 use crate::{
-    store::{Fought, Likely, Tried},
+    store::{Fought, Ground, Likely, Tried},
     watch::{Screen, Status},
 };
 
@@ -85,23 +85,34 @@ pub fn status_view(status: &Status) -> StatusView {
     }
 }
 
-/// Why a defense is likely behind an opponent's front, in the window's words: the
-/// opponent's own battles with it and when the last was kept, the other players who used
-/// it and their battles, the user's own battles with it.
-pub fn basis(likely: &Likely) -> String {
+/// Why a defense is likely behind an opponent's front, in the window's words, a part for
+/// each who used it: the day the opponent themself last did, the other players who do now
+/// (or, if none does, those who did before), the user. Players, never battles: see `Likely`.
+pub fn basis(likely: &Likely) -> Vec<String> {
     let mut said = Vec::new();
-    if likely.theirs > 0 {
-        let last = likely.their_last.as_deref().map_or("", kept_at);
-        said.push(format!("この相手 {}戦（最後 {last}）", likely.theirs));
+    if let Some(day) = &likely.their_last {
+        // "11-17" of "2026-11-17".
+        said.push(format!("本人 {}", day.get(5..).unwrap_or(day)));
     }
     if likely.others > 0 {
-        let (players, battles) = (likely.others, likely.other_battles);
-        said.push(format!("ほか {players}人・{battles}戦"));
+        said.push(format!("ほか {}人", likely.others));
+    } else if likely.others_before > 0 {
+        said.push(format!("ほか {}人（2週間より前）", likely.others_before));
     }
-    if likely.mine > 0 {
-        said.push(format!("自分の防衛 {}戦", likely.mine));
+    if likely.mine {
+        said.push("自分の防衛".to_owned());
     }
-    said.join("、")
+    said
+}
+
+/// What the window calls the defenses standing on a ground.
+pub fn ground(ground: Ground) -> &'static str {
+    match ground {
+        Ground::Theirs => "本人が使った編成（過去1か月）",
+        Ground::Trend => "流行（過去2週間）",
+        Ground::Before => "それより前の記録",
+        Ground::Mine => "自分の防衛だけにある編成",
+    }
 }
 
 /// How an attack fared against the defense: "3戦2勝".
@@ -165,7 +176,7 @@ pub fn update_text(update: &UpdateState) -> String {
 mod tests {
     use super::{Tone, basis, fared, fought_at, kept_at, status_view};
     use crate::{
-        store::{Fought, Likely, Tried},
+        store::{Fought, Ground, Likely, Tried},
         watch::{Screen, Status},
     };
 
@@ -211,26 +222,27 @@ mod tests {
     }
 
     #[test]
-    fn a_likely_defense_says_whose_battles_speak_for_it() {
+    fn a_likely_defense_says_who_used_it_and_never_how_many_battles() {
         let mut likely = Likely {
             rest: [1, 2, 3],
-            theirs: 2,
-            their_last: Some("2026-11-17 13:14:04".to_owned()),
+            ground: Ground::Theirs,
+            their_last: Some("2026-11-17".to_owned()),
             others: 0,
-            other_battles: 0,
-            mine: 0,
+            others_before: 0,
+            mine: false,
             attacks: Vec::new(),
         };
-        assert_eq!(basis(&likely), "この相手 2戦（最後 11-17 13:14）");
-        (likely.others, likely.other_battles, likely.mine) = (3, 5, 12);
+        assert_eq!(basis(&likely), ["本人 11-17"]);
+        (likely.others, likely.others_before, likely.mine) = (3, 1, true);
         assert_eq!(
             basis(&likely),
-            "この相手 2戦（最後 11-17 13:14）、ほか 3人・5戦、自分の防衛 12戦"
+            ["本人 11-17", "ほか 3人", "自分の防衛"],
+            "the players of now, not those of before as well"
         );
-        (likely.theirs, likely.their_last) = (0, None);
-        assert_eq!(basis(&likely), "ほか 3人・5戦、自分の防衛 12戦");
-        (likely.others, likely.other_battles) = (0, 0);
-        assert_eq!(basis(&likely), "自分の防衛 12戦");
+        (likely.their_last, likely.others) = (None, 0);
+        assert_eq!(basis(&likely), ["ほか 1人（2週間より前）", "自分の防衛"]);
+        likely.others_before = 0;
+        assert_eq!(basis(&likely), ["自分の防衛"]);
     }
 
     #[test]

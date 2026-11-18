@@ -577,7 +577,18 @@ impl Rio {
             };
             students.iter().map(name).collect::<Vec<_>>().join("、")
         };
+        let mut ground = None;
         for (rank, likely) in counsel.likely.iter().enumerate() {
+            // What makes the defenses from here on likely: the opponent's own, the trend...
+            if ground != Some(likely.ground) {
+                ground = Some(likely.ground);
+                let selector = format!("ground:likely-{rank}");
+                let heading = widgets::quiet(theme, view::ground(likely.ground))
+                    .debug_selector(move || selector.clone())
+                    .text_size(FS_CAPTION)
+                    .when(rank > 0, |heading| heading.mt(SP_3));
+                page = page.child(heading);
+            }
             let picked = chosen.as_ref().filter(|choice| choice.rest == likely.rest);
             let choose = |attack: Option<[i64; 6]>| Choice {
                 front,
@@ -585,10 +596,17 @@ impl Rio {
                 rest: likely.rest,
                 attack,
             };
-            // The defense's own row: its rank, the strikers behind the front, and why.
+            // The defense's own row: its rank, the whole team as the game lines it up (the
+            // front it shows, and behind the first striker those Rio supplies), and why.
             let alone = picked.is_some_and(|choice| choice.attack.is_none());
             let to = (!alone).then(|| choose(None));
-            let faces = likely.rest.into_iter().enumerate().map(|(slot, student)| {
+            let [second, third, fourth] = likely.rest;
+            let [left, right] = front.specials;
+            let whole = [front.first, second, third, fourth, left, right];
+            let faces = whole.into_iter().enumerate().map(|(slot, student)| {
+                let supplied = (1..4).contains(&slot);
+                let kind = if supplied { "supplied" } else { "shown" };
+                let selector = format!("{kind}:likely-{rank}-{slot}");
                 face(
                     theme,
                     &names,
@@ -596,8 +614,12 @@ impl Rio {
                     student,
                     SMALL,
                 )
+                .debug_selector(move || selector.clone())
+                .border_1()
+                .border_color(if supplied { theme.accent } else { theme.border })
+                .when(slot == 4, |face| face.ml(SP_2))
             });
-            let label = format!("防衛の候補 {}: {}", rank + 1, named(&likely.rest));
+            let label = format!("防衛の候補 {}: {}", rank + 1, named(&whole));
             let row =
                 widgets::candidate(theme, &format!("likely-{rank}"), &label, picked.is_some())
                     .mt(SP_2)
@@ -609,12 +631,20 @@ impl Rio {
                             .child(format!("{}", rank + 1)),
                     )
                     .child(div().flex().flex_none().gap(SP_1).children(faces))
+                    // Why: a part for each who used it, the row broken between parts only.
                     .child(
                         div()
+                            .flex()
+                            .flex_wrap()
                             .flex_1()
                             .min_w_0()
+                            .gap_x(SP_3)
                             .text_color(theme.muted)
-                            .child(text(view::basis(likely))),
+                            .children(
+                                view::basis(likely)
+                                    .into_iter()
+                                    .map(|part| text(part).flex_none().whitespace_nowrap()),
+                            ),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| this.choose(to.clone(), cx)));
             page = page.child(row);
@@ -784,8 +814,8 @@ fn face(
 }
 
 /// A team as the game lines it up, its icons `size` square: the four strikers, then the two
-/// specials apart, each with its place under it. A student expected from the records, not
-/// shown by the game, has a dashed frame; a place with nobody expected shows "?".
+/// specials apart, each with its place under it. A student supplied from the records, not
+/// shown by the game, has a frame of the accent; a place with nobody chosen shows "?".
 fn team(
     theme: &Theme,
     names: &HashMap<i64, String>,
@@ -805,11 +835,10 @@ fn team(
             Some(student) => face(theme, names, format!("{key}-{at}"), student, size)
                 .border_1()
                 .border_color(if seat.guessed {
-                    theme.muted
+                    theme.accent
                 } else {
                     theme.border
                 })
-                .when(seat.guessed, gpui::Styled::border_dashed)
                 .into_any_element(),
             None => div()
                 .flex()
@@ -825,7 +854,7 @@ fn team(
                 .child("?")
                 .into_any_element(),
         };
-        // The word fits under an icon of the full size alone; the dashed frame says it too.
+        // The word fits under an icon of the full size alone; the frame says it too.
         let place = if seat.guessed && seat.student.is_some() && size >= px(SEAT.0) {
             format!("{} 予測", seat.place)
         } else {

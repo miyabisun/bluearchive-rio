@@ -294,6 +294,12 @@ impl Listing {
     }
 }
 
+/// The time now, in seconds since 1970.
+pub fn clock() -> i64 {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+    now.map_or(0, |now| now.as_secs() as i64)
+}
+
 /// Starts reading the game, the records kept in the database at `database`. `paused` stops
 /// the reading while it is set; `chosen` is what the user chose in the window, marked over
 /// the game; what is found goes to `report` with the status then.
@@ -346,12 +352,6 @@ fn run(
         overlay::Overlay,
         trail::Trail,
     };
-
-    /// The seconds since 1970.
-    fn clock() -> i64 {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
-        now.map_or(0, |now| now.as_secs() as i64)
-    }
 
     /// Where the pointer is on the measured screen, if it is over the game's screen. The
     /// pointer is only asked for: nothing is sent to the game.
@@ -495,8 +495,9 @@ fn run(
             if saved.new
                 && let Some(mut opponent) = counselled.take()
             {
+                let (front, name) = (&opponent.front, opponent.name.as_ref());
                 opponent.counsel = store
-                    .counsel(&opponent.front, opponent.name.as_ref(), roster.as_deref())
+                    .counsel(front, name, roster.as_deref(), clock())
                     .map_err(records)?;
                 report(status.clone(), Some(Update::Opponent(opponent.clone())));
                 counselled = Some(opponent);
@@ -560,7 +561,7 @@ fn run(
                     .map(|held| held.iter().filter_map(|student| student.id).collect());
                 ranks = held.iter().flatten().filter_map(rank).collect();
                 let counsel = store
-                    .counsel(&front, name.as_ref(), roster.as_deref())
+                    .counsel(&front, name.as_ref(), roster.as_deref(), clock())
                     .map_err(records)?;
                 let opponent = Opponent {
                     front,

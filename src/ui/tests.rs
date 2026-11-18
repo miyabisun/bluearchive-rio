@@ -14,7 +14,7 @@ use crate::{
     app::{Core, Places, Snapshot, UpdateCheck},
     opponent::Front,
     settings::{Settings, ThemeChoice},
-    store::{Counsel, Fought, Kept, Likely, Player, Tried},
+    store::{Counsel, Fought, Ground, Kept, Likely, Player, Tried},
     watch::{Choice, Opponent, Screen, Status},
 };
 
@@ -95,9 +95,9 @@ const ATTACKS: [[i64; 6]; 2] = [
     [10005, 10037, 10062, 10006, 20016, 20008],
 ];
 
-/// An opponent with the front: the first defense is the opponent's own of two battles, with
-/// the two attacks (two of three won, one of two); the second was used by two other players
-/// and by the user, and no attack won against it.
+/// An opponent with the front: the first defense is the opponent's own of this month, with
+/// the two attacks (two of three won, one of two); the second is the trend, used by two
+/// other players and by the user, and no attack won against it.
 fn opponent() -> Opponent {
     let tried = |attack, wins, battles| Tried {
         attack,
@@ -106,20 +106,20 @@ fn opponent() -> Opponent {
     };
     let own = Likely {
         rest: BEHIND[0],
-        theirs: 2,
-        their_last: Some("2026-11-17 13:14:04".to_owned()),
+        ground: Ground::Theirs,
+        their_last: Some("2026-11-17".to_owned()),
         others: 0,
-        other_battles: 0,
-        mine: 0,
+        others_before: 0,
+        mine: false,
         attacks: vec![tried(ATTACKS[0], 2, 3), tried(ATTACKS[1], 1, 2)],
     };
     let others = Likely {
         rest: BEHIND[1],
-        theirs: 0,
+        ground: Ground::Trend,
         their_last: None,
         others: 2,
-        other_battles: 3,
-        mine: 4,
+        others_before: 0,
+        mine: true,
         attacks: Vec::new(),
     };
     Opponent {
@@ -190,13 +190,27 @@ fn an_opponent_lists_the_defenses_likely_and_chooses_none(cx: &mut TestAppContex
         "nobody stands behind her until the user says who"
     );
     assert!(shows(vcx, "防衛の候補"));
-    assert!(shows(vcx, "この相手 2戦（最後 11-17 13:14）"));
-    assert!(shows(vcx, "ほか 2人・3戦、自分の防衛 4戦"));
+    assert!(shows(vcx, "本人 11-17"));
+    assert!(
+        shows(vcx, "ほか 2人") && shows(vcx, "自分の防衛"),
+        "players, not battles"
+    );
     let (first, second) = (
         bounds(vcx, "candidate:likely-0").expect("the likeliest defense"),
         bounds(vcx, "candidate:likely-1").expect("the next"),
     );
     assert!(first.top() < second.top(), "the likeliest first");
+    // Each stands under what makes it likely: the opponent's own, then the trend.
+    let (theirs, trend) = (
+        bounds(vcx, "ground:likely-0").expect("the opponent's own"),
+        bounds(vcx, "ground:likely-1").expect("the trend"),
+    );
+    assert!(shows(vcx, "本人が使った編成（過去1か月）") && shows(vcx, "流行（過去2週間）"));
+    assert!(theirs.top() < first.top() && first.top() < trend.top() && trend.top() < second.top());
+    assert!(
+        !shows(vcx, "それより前の記録"),
+        "no heading without a defense"
+    );
     // The attacks that won against the first stand under it, the best first.
     assert!(shows(vcx, "3戦2勝") && shows(vcx, "2戦1勝"));
     let (best, next) = (
@@ -206,6 +220,29 @@ fn an_opponent_lists_the_defenses_likely_and_chooses_none(cx: &mut TestAppContex
     assert!(first.top() < best.top() && best.top() < next.top() && next.top() < second.top());
     assert!(shows(vcx, "この防衛に勝った攻撃は、まだ登録がありません。"));
     assert_eq!(core.chosen(), None, "nothing is chosen for the user");
+}
+
+#[gpui::test]
+fn a_likely_defense_shows_the_whole_team_and_marks_whom_rio_supplies(cx: &mut TestAppContext) {
+    let (_, core, vcx) = open(cx);
+    set(&core, vcx, |snapshot| snapshot.opponent = Some(opponent()));
+    // D1 and the specials as the game shows them, D2 to D4 from the records, in the game's
+    // order: nothing of the front is left to remember.
+    let row = bounds(vcx, "candidate:likely-1").expect("a defense");
+    let kinds = [
+        "shown", "supplied", "supplied", "supplied", "shown", "shown",
+    ];
+    let mut left = row.left();
+    for (slot, kind) in kinds.into_iter().enumerate() {
+        let face = bounds(vcx, &format!("{kind}:likely-1-{slot}"))
+            .unwrap_or_else(|| panic!("the icon of place {slot} is not {kind}"));
+        assert!(
+            face.left() > left,
+            "place {slot} stands right of the one before"
+        );
+        assert!(face.top() >= row.top() && face.bottom() <= row.bottom());
+        left = face.left();
+    }
 }
 
 #[gpui::test]
