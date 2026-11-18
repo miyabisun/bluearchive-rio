@@ -231,14 +231,54 @@ pub fn align(kept: &[Listed], seen: &[Option<Sighting>], carried: &[Option<i64>]
         .zip(&seen)
         .any(|(told, seen)| told.is_none() && seen.is_some())
     {
-        told = vec![None; seen.len()];
-        for (row, id) in carried.iter().enumerate().take(seen.len()) {
-            let known = id.and_then(|id| index.get(&id).copied());
-            if let Some(at) = known.filter(|at| same(row, *at) && !told.contains(&Some(*at))) {
-                told[row] = Some(at);
+        // The rows carried, each taken for the row `by` further down its run, and what the
+        // rows kept tell from them; `None` if a row carried has no such row, or one that
+        // tells another fight (as carried, by 0, such a row is left out).
+        let from = |by: isize| {
+            let mut told: Vec<Option<usize>> = vec![None; seen.len()];
+            for (row, id) in carried.iter().enumerate().take(seen.len()) {
+                let Some(at) = id.and_then(|id| index.get(&id).copied()) else {
+                    continue;
+                };
+                let step = |at: usize, _| if by > 0 { below[at] } else { above[at] };
+                let known = (0..by.abs()).try_fold(at, step);
+                match known.filter(|at| same(row, *at) && !told.contains(&Some(*at))) {
+                    Some(at) => told[row] = Some(at),
+                    None if by == 0 => {}
+                    None => return None,
+                }
             }
-        }
-        tell(&mut told);
+            tell(&mut told);
+            told.iter().any(Option::is_some).then_some(told)
+        };
+        // Whether the list shows, beside a row told, another row than the one kept there.
+        let torn = |told: &[Option<usize>]| {
+            (0..seen.len()).any(|row| {
+                let Some(at) = told[row] else {
+                    return false;
+                };
+                let sides = beside(row).into_iter().zip(kept_beside(at));
+                sides
+                    .flat_map(|(shown, known)| shown.zip(known))
+                    .any(|(shown, known)| seen[shown].is_some() && told[shown] != Some(known))
+            })
+        };
+        // What was carried may be a row or two off along a run of rows that tell the same
+        // (the list's move between two frames was mistaken): if the rows kept do not fit
+        // the rows as carried, and fit them a row or two further along, that is what they
+        // are. Else the list shows what the rows kept do not tell, and they give way.
+        let carried = from(0).unwrap_or_else(|| vec![None; seen.len()]);
+        let along = || {
+            [1, -1, 2, -2]
+                .into_iter()
+                .filter_map(from)
+                .find(|told| !torn(told))
+        };
+        told = if torn(&carried) {
+            along().unwrap_or(carried)
+        } else {
+            carried
+        };
     }
     // The rest, from the last up: a new battle stands above the older ones like it.
     let mut matches: Vec<Match> = told
@@ -257,7 +297,8 @@ pub fn align(kept: &[Listed], seen: &[Option<Sighting>], carried: &[Option<i64>]
             .filter(|at| fits(&told, row, *at).is_some())
             .collect();
         // Of rows kept alone, nothing but the time tells one from another: the one whose
-        // time fits best, the one kept last of those.
+        // time fits best, the latest of those (a list that was up before Rio looked tells
+        // no earliest time), the one kept last.
         let shared = |at: &usize| {
             let (kept, seen) = (kept[*at].range, sighting.range);
             kept.1.min(seen.1) - kept.0.max(seen.0)
@@ -265,7 +306,7 @@ pub fn align(kept: &[Listed], seen: &[Option<Sighting>], carried: &[Option<i64>]
         if fitting.len() > 1 && fitting.iter().all(|at| alone(*at)) {
             fitting = fitting
                 .into_iter()
-                .max_by_key(|at| (shared(at), *at))
+                .max_by_key(|at| (shared(at), kept[*at].range.1, *at))
                 .into_iter()
                 .collect();
         } else if let Some(one) = one(&fitting) {
@@ -794,6 +835,48 @@ mod tests {
             align(&kept, &rows[..2], &[Some(102), Some(103)]),
             [Kept(2), Kept(3)]
         );
+    }
+
+    #[test]
+    fn rows_carried_one_off_are_the_rows_the_run_tells() {
+        // Seen on 2026-11-18: three rows that tell the same (the player 14 thrice), then
+        // another, which stands in a run of its own (the two runs were never seen to meet).
+        let kept = kept(&[
+            &[(10, 9100), (14, 9000), (14, 9000), (14, 9000)],
+            &[(15, 8000), (12, 7000)],
+        ]);
+        let rows = [seen(14, 9000), seen(14, 9000), seen(15, 8000)];
+        // The second and the third of the three, carried as the first and the second: the
+        // other row would stand under the second, where the third is kept.
+        assert_eq!(
+            align(&kept, &rows, &[Some(101), Some(102), None]),
+            [Kept(2), Kept(3), Likely(4)]
+        );
+        // Carried as they are, they stay.
+        assert_eq!(
+            align(&kept, &rows, &[Some(102), Some(103), None]),
+            [Kept(2), Kept(3), Likely(4)]
+        );
+        // A row never seen under one of the three: rather under the last of them, where no
+        // row is kept, than under the first.
+        let rows = [seen(14, 9000), seen(16, 8500)];
+        assert_eq!(align(&kept, &rows, &[Some(101), None]), [Kept(3), New]);
+        // Where no move along the run fits, the list shows what was not kept: a row never
+        // seen under the row above the three, and they give way.
+        let rows = [seen(10, 9100), seen(16, 8500)];
+        assert_eq!(align(&kept, &rows, &[Some(100), None]), [Kept(0), New]);
+    }
+
+    #[test]
+    fn of_rows_kept_alone_at_any_time_the_latest_is_the_row() {
+        // A list that was up before Rio looked tells no earliest time: a row of three days
+        // ago is like the rows kept of that player then and before. It is the latest.
+        let alone = kept(&[&[(14, 5000)], &[(14, 9000)], &[(14, 1000)]]);
+        let open = Some(Sighting {
+            fight: fight(14),
+            range: (i64::MIN / 2, 9000),
+        });
+        assert_eq!(fresh(&alone, &[open]), [Kept(1)]);
     }
 
     #[test]

@@ -164,6 +164,21 @@ impl Store {
                  COMMIT;",
             )?;
         }
+        // The versions 0.1.8 and 0.1.9 could take the rows in sight for rows one off along
+        // a run of rows that tell the same, and kept what followed from it: a row that is
+        // not in the list, rows cut off from the rows under them. Which rows of a database
+        // they wrote are such cannot be told, so what they kept is dropped once, but for
+        // what a record told: the rows that have a record stay, each by itself.
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version < 1 {
+            connection.execute_batch(
+                "BEGIN;
+                 UPDATE list_rows SET above = NULL;
+                 DELETE FROM list_rows WHERE battle IS NULL;
+                 PRAGMA user_version = 1;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self(connection))
     }
 
@@ -323,8 +338,23 @@ impl Store {
     }
 
     /// Takes a battle kept for the record of a row: the row's time is the battle's from
-    /// here on, and no other row's.
+    /// here on, and no other row's. A row that had it and tells the same fight takes the
+    /// record this row had instead: of rows that tell the same, Rio may have taken one for
+    /// another, and neither is left without its record.
     pub fn link(&self, row: i64, battle: i64) -> rusqlite::Result<()> {
+        let had: Option<i64> =
+            self.0
+                .query_row("SELECT battle FROM list_rows WHERE id = ?1", [row], |row| {
+                    row.get(0)
+                })?;
+        let other = self.0.query_row(
+            "SELECT o.id FROM list_rows o JOIN list_rows r ON r.id = ?1
+             WHERE o.battle = ?2 AND o.id <> ?1 AND o.attacked = r.attacked AND o.won = r.won
+                   AND o.opponent IS r.opponent",
+            [row, battle],
+            |row| row.get::<_, i64>(0),
+        );
+        let other = other.optional()?;
         self.0.execute(
             "UPDATE list_rows SET battle = NULL WHERE battle = ?2 AND id <> ?1",
             [row, battle],
@@ -333,6 +363,12 @@ impl Store {
             "UPDATE list_rows SET battle = ?2 WHERE id = ?1",
             [row, battle],
         )?;
+        if let (Some(other), Some(had)) = (other, had.filter(|had| *had != battle)) {
+            self.0.execute(
+                "UPDATE list_rows SET battle = ?2 WHERE id = ?1",
+                [other, had],
+            )?;
+        }
         Ok(())
     }
 
@@ -1080,6 +1116,65 @@ mod tests {
     fn ids(sights: &Sights) -> Vec<Option<i64>> {
         let id = |sight: &Sight| sight.row.map(|row| row.id);
         sights.rows.iter().map(id).collect()
+    }
+
+    #[test]
+    fn a_record_another_row_has_changes_hands_with_the_rows_own() {
+        let store = store();
+        let (one, other) = (
+            store.keep(&battle(100)).unwrap(),
+            store.keep(&battle(200)).unwrap(),
+        );
+        // Two rows that tell the same, each with the other's record: Rio could not tell
+        // which of them was pressed.
+        let first = store.list(&row(None, 9000)).unwrap();
+        let second = store.list(&row(None, 9000)).unwrap();
+        store.link(first, other.id).unwrap();
+        store.link(second, one.id).unwrap();
+        // The first is pressed, and shows the record the second has: they change hands.
+        store.link(first, one.id).unwrap();
+        let listed = store.listed(0).unwrap();
+        assert_eq!(
+            (listed[0].battle, listed[1].battle),
+            (Some(one.id), Some(other.id)),
+            "no row loses its record"
+        );
+        // A row that tells another fight had the record: it loses it, and takes none.
+        let third = store
+            .list(&row(store.opponent(Some(&plate(3))).unwrap(), 5000))
+            .unwrap();
+        store.link(third, other.id).unwrap();
+        store.link(first, other.id).unwrap();
+        let listed = store.listed(0).unwrap();
+        let battles: Vec<Option<i64>> = listed.iter().map(|row| row.battle).collect();
+        assert_eq!(battles, [Some(other.id), None, None]);
+    }
+
+    #[test]
+    fn rows_kept_before_the_runs_could_be_trusted_are_kept_by_their_records_only() {
+        // A database as the version 0.1.9 left it: rows side by side, one of them with a
+        // record, one that tells the same kept under it that is not in the list.
+        let old = Store::open(Path::new(":memory:")).unwrap();
+        let read = old.keep(&battle(100)).unwrap();
+        let rows: Vec<i64> = (0..3)
+            .map(|_| old.list(&row(None, 9000)).unwrap())
+            .collect();
+        old.join(rows[0], rows[1]).unwrap();
+        old.join(rows[1], rows[2]).unwrap();
+        old.link(rows[1], read.id).unwrap();
+        old.0.execute_batch("PRAGMA user_version = 0").unwrap();
+        let store = Store::prepared(old.0).unwrap();
+        let listed = store.listed(0).unwrap();
+        let kept: Vec<_> = listed
+            .iter()
+            .map(|row| (row.id, row.above, row.battle))
+            .collect();
+        assert_eq!(kept, [(rows[1], None, Some(read.id))]);
+        // Done once: rows kept from here on stay as they are kept.
+        let under = store.list(&row(None, 5000)).unwrap();
+        store.join(rows[1], under).unwrap();
+        let store = Store::prepared(store.0).unwrap();
+        assert_eq!(above(&store, &[under]), [Some(rows[1])]);
     }
 
     #[test]
