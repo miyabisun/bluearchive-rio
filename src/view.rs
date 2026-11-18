@@ -1,9 +1,9 @@
-//! What the window derives from the snapshot to show: the status badge's words, where the
-//! defense expected comes from, and how an attack fared. Pure, so the tests read them
-//! without a window.
+//! What the window derives from the snapshot to show: the status badge's words, why a
+//! defense is likely, and how an attack fared. Pure, so the tests read them without a
+//! window.
 
 use crate::{
-    store::{Counsel, Fought, Tried},
+    store::{Fought, Likely, Tried},
     watch::{Screen, Status},
 };
 
@@ -85,17 +85,23 @@ pub fn status_view(status: &Status) -> StatusView {
     }
 }
 
-/// Where the defense expected behind an opponent's front comes from, in the window's words;
-/// with none expected, that nothing is kept yet.
-pub fn expected_from(counsel: &Counsel) -> String {
-    match (&counsel.last, counsel.seen.first()) {
-        (Some(_), _) => "この相手が最後に登録された防衛です。".to_owned(),
-        (None, Some(seen)) => format!(
-            "同じ D1 とスペシャルで最も多い防衛です（{}回）。",
-            seen.battles
-        ),
-        (None, None) => "同じ D1 とスペシャルの防衛は、まだ登録がありません。".to_owned(),
+/// Why a defense is likely behind an opponent's front, in the window's words: the
+/// opponent's own battles with it and when the last was kept, the other players who used
+/// it and their battles, the user's own battles with it.
+pub fn basis(likely: &Likely) -> String {
+    let mut said = Vec::new();
+    if likely.theirs > 0 {
+        let last = likely.their_last.as_deref().map_or("", kept_at);
+        said.push(format!("この相手 {}戦（最後 {last}）", likely.theirs));
     }
+    if likely.others > 0 {
+        let (players, battles) = (likely.others, likely.other_battles);
+        said.push(format!("ほか {players}人・{battles}戦"));
+    }
+    if likely.mine > 0 {
+        said.push(format!("自分の防衛 {}戦", likely.mine));
+    }
+    said.join("、")
 }
 
 /// How an attack fared against the defense: "3戦2勝".
@@ -157,9 +163,9 @@ pub fn update_text(update: &UpdateState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tone, expected_from, fared, fought_at, kept_at, status_view};
+    use super::{Tone, basis, fared, fought_at, kept_at, status_view};
     use crate::{
-        store::{Counsel, Fought, Seen, Tried},
+        store::{Fought, Likely, Tried},
         watch::{Screen, Status},
     };
 
@@ -205,31 +211,26 @@ mod tests {
     }
 
     #[test]
-    fn the_defense_expected_says_where_it_comes_from() {
-        let seen = vec![Seen {
+    fn a_likely_defense_says_whose_battles_speak_for_it() {
+        let mut likely = Likely {
             rest: [1, 2, 3],
-            battles: 2,
-            last_seen: "2026-11-17 13:14:04".to_owned(),
-        }];
-        let mut counsel = Counsel {
-            seen,
-            last: Some([4, 5, 6]),
-            attack: None,
+            theirs: 2,
+            their_last: Some("2026-11-17 13:14:04".to_owned()),
+            others: 0,
+            other_battles: 0,
+            mine: 0,
+            attacks: Vec::new(),
         };
+        assert_eq!(basis(&likely), "この相手 2戦（最後 11-17 13:14）");
+        (likely.others, likely.other_battles, likely.mine) = (3, 5, 12);
         assert_eq!(
-            expected_from(&counsel),
-            "この相手が最後に登録された防衛です。"
+            basis(&likely),
+            "この相手 2戦（最後 11-17 13:14）、ほか 3人・5戦、自分の防衛 12戦"
         );
-        counsel.last = None;
-        assert_eq!(
-            expected_from(&counsel),
-            "同じ D1 とスペシャルで最も多い防衛です（2回）。"
-        );
-        counsel.seen.clear();
-        assert_eq!(
-            expected_from(&counsel),
-            "同じ D1 とスペシャルの防衛は、まだ登録がありません。"
-        );
+        (likely.theirs, likely.their_last) = (0, None);
+        assert_eq!(basis(&likely), "ほか 3人・5戦、自分の防衛 12戦");
+        (likely.others, likely.other_battles) = (0, 0);
+        assert_eq!(basis(&likely), "自分の防衛 12戦");
     }
 
     #[test]

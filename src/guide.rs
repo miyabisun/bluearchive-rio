@@ -1,6 +1,6 @@
-//! What Rio marks over the game, on the measured screen (see `history`): the strikers it
-//! expects where the game shows "?", and in the formation dialog the cards to pick and to
-//! take out for the attack the records counsel. Positions in the team are set after the
+//! What Rio marks over the game, on the measured screen (see `history`): the strikers the
+//! user takes to stand where the game shows "?", and in the formation dialog the cards to
+//! pick and to take out for the attack the user chose. Positions in the team are set after the
 //! dialog, by dragging: in it, the six students are only chosen. Over a battle record it
 //! says whether the record is kept, and over the list of records which rows' records are:
 //! the user's eyes stay on the game.
@@ -208,14 +208,15 @@ fn guesses(behind: [i64; 3], middle: impl Fn(usize) -> (f32, f32), side: f32) ->
         .collect()
 }
 
-/// The marks over the opponent's dialog: the strikers expected behind the front.
+/// The marks over the opponent's dialog: the strikers the user takes to stand behind the
+/// front.
 pub fn for_opponent(behind: [i64; 3]) -> Vec<Mark> {
     let card = |at: usize| (CARD.0 + (at + 1) as f32 * CARD_STEP, CARD.1);
     guesses(behind, card, CARD_SIDE)
 }
 
-/// The marks over the formation dialog: the strikers expected behind the front, and for
-/// the `attack` counselled (A1 to A4, then the specials) the cards to take out of the
+/// The marks over the formation dialog: the strikers the user takes to stand behind the
+/// front, and for the `attack` chosen (A1 to A4, then the specials) the cards to take out of the
 /// team, the cards of the open tab to pick, the students to scroll to, and the other tab
 /// once this one is done.
 pub fn for_formation(

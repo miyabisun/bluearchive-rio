@@ -1,11 +1,12 @@
 //! Reading the game in a thread of its own: every frame of its window is read for a battle
 //! record (kept), the list of records (its rows kept, for the times they tell), an
-//! opponent's dialog and the formation dialog (counselled from the records, and marked over
-//! the game). What it finds is reported to the window (`app`).
+//! opponent's dialog and the formation dialog (what the records say against the opponent
+//! goes to the window, and what the user chooses there is marked over the game). What it
+//! finds is reported to the window (`app`).
 
 use std::{
     path::PathBuf,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{Arc, Mutex, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -51,6 +52,36 @@ pub struct Opponent {
     /// The opponent's name as the game draws it, where its dialog was read.
     pub name: Option<Plate>,
     pub counsel: Counsel,
+}
+
+/// The defense the user takes an opponent to have behind its front, and the attack the
+/// user chose against it: picked in the window, marked over the game here. Rio picks
+/// neither (most defenses kept are the user's own, so the records alone would make every
+/// opponent the user).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub front: Front,
+    pub name: Option<Plate>,
+    /// The strikers D2 to D4 taken to stand behind the front.
+    pub rest: [i64; 3],
+    /// The attack to pick in the formation dialog (A1 to A4, then the specials).
+    pub attack: Option<[i64; 6]>,
+}
+
+impl Choice {
+    /// Whether the choice was made for this opponent: the same front, the same name drawn.
+    pub fn of(&self, opponent: &Opponent) -> bool {
+        self.front == opponent.front && named_alike(self.name.as_ref(), opponent.name.as_ref())
+    }
+}
+
+/// Whether two names the game drew are one name (see `Plate::same`), or both none.
+fn named_alike(name: Option<&Plate>, other: Option<&Plate>) -> bool {
+    match (name, other) {
+        (Some(name), Some(other)) => name.same(other),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 /// What the reading found.
@@ -264,14 +295,16 @@ impl Listing {
 }
 
 /// Starts reading the game, the records kept in the database at `database`. `paused` stops
-/// the reading while it is set; what is found goes to `report` with the status then.
+/// the reading while it is set; `chosen` is what the user chose in the window, marked over
+/// the game; what is found goes to `report` with the status then.
 pub fn start(
     database: PathBuf,
     paused: Arc<AtomicBool>,
+    chosen: Arc<Mutex<Option<Choice>>>,
     report: impl Fn(Status, Option<Update>) + Send + 'static,
 ) {
     std::thread::spawn(move || {
-        if let Err(error) = run(&database, &paused, &report) {
+        if let Err(error) = run(&database, &paused, &chosen, &report) {
             report(Status::Failed(error), None);
         }
     });
@@ -281,6 +314,7 @@ pub fn start(
 fn run(
     _database: &std::path::Path,
     _paused: &AtomicBool,
+    _chosen: &Mutex<Option<Choice>>,
     _report: &dyn Fn(Status, Option<Update>),
 ) -> Result<(), String> {
     Err("ゲームのウィンドウを読めるのは Windows だけです。".to_owned())
@@ -290,11 +324,13 @@ fn run(
 fn run(
     database: &std::path::Path,
     paused: &AtomicBool,
+    chosen: &Mutex<Option<Choice>>,
     report: &dyn Fn(Status, Option<Update>),
 ) -> Result<(), String> {
     use std::{
         collections::HashMap,
         sync::{
+            PoisonError,
             atomic::Ordering,
             mpsc::{RecvTimeoutError, channel},
         },
@@ -514,7 +550,9 @@ fn run(
             // The name is the opponent's while the front is the one its dialog showed.
             let name = met.as_ref().filter(|(met, _)| *met == front);
             let name = name.and_then(|(_, name)| name.clone());
-            let same = |known: &Opponent| known.front == front && known.name == name;
+            let same = |known: &Opponent| {
+                known.front == front && named_alike(known.name.as_ref(), name.as_ref())
+            };
             if !counselled.as_ref().is_some_and(same) {
                 let held = aoi::held().ok();
                 roster = held
@@ -532,16 +570,20 @@ fn run(
                 report(status.clone(), Some(Update::Opponent(opponent.clone())));
                 counselled = Some(opponent);
             }
-            if let Some(Opponent { counsel, .. }) = &counselled {
+            // Marked is what the user chose for this opponent, and nothing before that.
+            if let Some(opponent) = &counselled {
+                let chosen = chosen.lock().unwrap_or_else(PoisonError::into_inner);
+                let choice = chosen.as_ref().filter(|choice| choice.of(opponent));
+                let behind = choice.map(|choice| choice.rest);
                 marks = match &forming {
                     Some(shown) => guide::for_formation(
                         shown,
-                        counsel.behind(),
-                        counsel.attack.as_ref().map(|tried| tried.attack),
+                        behind,
+                        choice.and_then(|choice| choice.attack),
                         visit.enter(&shown.placed, now),
                         &ranks,
                     ),
-                    None => counsel.behind().map_or_else(Vec::new, guide::for_opponent),
+                    None => behind.map_or_else(Vec::new, guide::for_opponent),
                 };
             }
         }
@@ -763,6 +805,32 @@ mod tests {
         };
         let first = store.listed(0).unwrap()[0].id;
         assert_eq!(listing.opened(after(700), fight, battle.id), Some(first));
+    }
+
+    #[test]
+    fn a_choice_is_of_the_opponent_it_was_made_for() {
+        use super::{Choice, Opponent};
+        use crate::{opponent::Front, store::Counsel};
+        let front = Front {
+            first: 1,
+            specials: [2, 3],
+        };
+        let opponent = |front: Front, name: Option<u32>| Opponent {
+            front,
+            name: name.map(plate),
+            counsel: Counsel { likely: Vec::new() },
+        };
+        let choice = Choice {
+            front,
+            name: Some(plate(5)),
+            rest: [4, 5, 6],
+            attack: None,
+        };
+        assert!(choice.of(&opponent(front, Some(5))));
+        assert!(!choice.of(&opponent(front, Some(3))), "another name");
+        assert!(!choice.of(&opponent(front, None)), "no name");
+        let other = Front { first: 9, ..front };
+        assert!(!choice.of(&opponent(other, Some(5))), "another front");
     }
 
     #[test]

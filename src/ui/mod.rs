@@ -34,7 +34,7 @@ use crate::{
     settings::{Placement, Settings, ThemeChoice},
     store::{Kept, Player},
     view::{self, UpdateState},
-    watch::Status,
+    watch::{Choice, Status},
 };
 
 use self::{
@@ -66,11 +66,14 @@ const BATTLE_ROW: Pixels = px(116.);
 const TEAM_GAPS: f32 = 68.;
 /// How tall a name drawn by the game is shown.
 const PLATE: Pixels = px(20.);
+/// The room of a candidate's rank before its row.
+const RANK: Pixels = px(16.);
 
 /// The tabs, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
-    /// The opponent the game showed last: the defense expected and the attack counselled.
+    /// The opponent the game showed last: the defenses likely behind its front and the
+    /// attacks that won against each, to choose from.
     Match,
     /// The battles kept.
     History,
@@ -510,20 +513,24 @@ impl Rio {
             )
     }
 
-    /// The opponent the game showed last: the defense expected behind the front, the attack
-    /// the records counsel against it, and the other defenses seen behind the same front.
-    fn match_tab(&mut self, theme: &Theme, window: &Window) -> AnyElement {
+    /// The opponent the game showed last: its front as the game shows it, and the defenses
+    /// that may stand behind it, the likeliest first, each with why it is likely and the
+    /// attacks that won against it. A click chooses an attack with its defense (or, on a
+    /// defense's own row, the defense alone), and a click on what is chosen gives it up:
+    /// nothing is chosen for the user. What is chosen is marked over the game.
+    fn match_tab(&mut self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let page = scroll("match", &self.content);
         let wide = f32::from(window.viewport_size().width - SP_3 * 2.);
         let seat = px(((wide - TEAM_GAPS) / 6.).clamp(SEAT.1, SEAT.0));
         let Some(opponent) = self.shown.opponent.clone() else {
-            let waiting = "対戦相手を選ぶと、防衛の編成の予測と、おすすめの攻撃がここに出ます。";
+            let waiting = "対戦相手を選ぶと、防衛の編成の候補と、勝った攻撃の候補がここに出ます。";
             return page
                 .child(widgets::empty(theme, "match", waiting))
                 .into_any_element();
         };
+        let chosen = self.core.chosen().filter(|choice| choice.of(&opponent));
         let (front, counsel) = (opponent.front, &opponent.counsel);
-        let behind = counsel.behind();
+        let behind = chosen.as_ref().map(|choice| choice.rest);
         let hidden = |place, at: usize| Seat {
             place,
             student: behind.map(|behind| behind[at]),
@@ -548,77 +555,104 @@ impl Rio {
             .and_then(|name| self.plate(&name.png(), theme))
             .map(|(picture, wide)| plate_picture(picture, wide, "相手の名前"));
         let names = self.names.clone();
+        let state = match (counsel.likely.is_empty(), &chosen) {
+            (true, _) => "同じ D1 とスペシャルの防衛は、まだ登録がありません。",
+            (false, None) => "D2〜D4 は、下の候補から選ぶと出ます。",
+            (false, Some(_)) => "D2〜D4 は、選んだ候補です。",
+        };
         let mut page = page
             .child(group(theme, "相手の防衛", name))
             .child(team(theme, &names, "defense", &defense, seat))
-            .child(
-                widgets::quiet(theme, view::expected_from(counsel))
-                    .mt(SP_2)
-                    .mb(SP_4),
-            );
-        if behind.is_some() {
-            let fared = counsel.attack.as_ref().map(|tried| {
-                div()
-                    .text_size(FS_SM)
-                    .font_weight(FontWeight::NORMAL)
-                    .font_features(theme::tabular())
-                    .child(text(view::fared(tried)))
-                    .into_any_element()
-            });
-            page = page.child(group(theme, "おすすめの攻撃", fared));
-            page = match &counsel.attack {
-                Some(tried) => {
-                    let places = ["A1", "A2", "A3", "A4", "SP", "SP"];
-                    let attack: Vec<Seat> = places
-                        .into_iter()
-                        .zip(tried.attack)
-                        .map(|(place, student)| shown(place, student))
-                        .collect();
-                    page.child(team(theme, &names, "attack", &attack, seat).mb(SP_4))
-                }
-                None => {
-                    let none = "この防衛に勝った攻撃は、まだ登録がありません。";
-                    page.child(widgets::quiet(theme, none).mb(SP_4))
-                }
-            };
+            .child(widgets::quiet(theme, state).mt(SP_2).mb(SP_4));
+        if !counsel.likely.is_empty() {
+            let how = widgets::quiet(theme, "攻撃を選ぶと、編成の画面で案内します")
+                .font_weight(FontWeight::NORMAL)
+                .into_any_element();
+            page = page.child(group(theme, "防衛の候補", Some(how)));
         }
-        let others: Vec<_> = counsel
-            .seen
-            .iter()
-            .filter(|seen| Some(seen.rest) != behind)
-            .collect();
-        if !others.is_empty() {
-            page = page.child(group(theme, "ほかに見た防衛", None));
-            for (at, seen) in others.into_iter().enumerate() {
-                let faces = seen.rest.into_iter().enumerate().map(|(slot, student)| {
-                    face(theme, &names, format!("seen-{at}-{slot}"), student, SMALL)
+        let named = |students: &[i64]| -> String {
+            let name = |student: &i64| {
+                let known = names.get(student).cloned();
+                known.unwrap_or_else(|| format!("生徒#{student}"))
+            };
+            students.iter().map(name).collect::<Vec<_>>().join("、")
+        };
+        for (rank, likely) in counsel.likely.iter().enumerate() {
+            let picked = chosen.as_ref().filter(|choice| choice.rest == likely.rest);
+            let choose = |attack: Option<[i64; 6]>| Choice {
+                front,
+                name: opponent.name.clone(),
+                rest: likely.rest,
+                attack,
+            };
+            // The defense's own row: its rank, the strikers behind the front, and why.
+            let alone = picked.is_some_and(|choice| choice.attack.is_none());
+            let to = (!alone).then(|| choose(None));
+            let faces = likely.rest.into_iter().enumerate().map(|(slot, student)| {
+                face(
+                    theme,
+                    &names,
+                    format!("likely-{rank}-{slot}"),
+                    student,
+                    SMALL,
+                )
+            });
+            let label = format!("防衛の候補 {}: {}", rank + 1, named(&likely.rest));
+            let row =
+                widgets::candidate(theme, &format!("likely-{rank}"), &label, picked.is_some())
+                    .mt(SP_2)
+                    .child(
+                        div()
+                            .w(RANK)
+                            .flex_none()
+                            .font_features(theme::tabular())
+                            .child(format!("{}", rank + 1)),
+                    )
+                    .child(div().flex().flex_none().gap(SP_1).children(faces))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(theme.muted)
+                            .child(text(view::basis(likely))),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.choose(to.clone(), cx)));
+            page = page.child(row);
+            // Under it, the attacks that won against it, the best first.
+            for (nth, tried) in likely.attacks.iter().enumerate() {
+                let taken = picked.is_some_and(|choice| choice.attack == Some(tried.attack));
+                let to = Some(choose((!taken).then_some(tried.attack)));
+                let faces = tried.attack.into_iter().enumerate().map(|(slot, student)| {
+                    let key = format!("attack-{rank}-{nth}-{slot}");
+                    face(theme, &names, key, student, SMALL).when(slot == 4, |face| face.ml(SP_2))
                 });
-                page = page.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(SP_2)
-                        .mb(SP_2)
-                        .child(
-                            div()
-                                .w(px(40.))
-                                .flex_none()
-                                .text_size(FS_SM)
-                                .font_features(theme::tabular())
-                                .child(text(format!("{}回", seen.battles))),
-                        )
-                        .child(div().flex().gap(SP_1).children(faces))
-                        .child(
-                            div()
-                                .text_size(FS_CAPTION)
-                                .text_color(theme.muted)
-                                .font_features(theme::tabular())
-                                .child(format!("最後に登録 {}", view::kept_at(&seen.last_seen))),
-                        ),
-                );
+                let label = format!("攻撃の候補: {}", named(&tried.attack));
+                let row = widgets::candidate(theme, &format!("attack-{rank}-{nth}"), &label, taken)
+                    .ml(RANK + SP_2)
+                    .child(div().flex().flex_none().gap(SP_1).children(faces))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_features(theme::tabular())
+                            .child(text(view::fared(tried))),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.choose(to.clone(), cx)));
+                page = page.child(row);
+            }
+            if likely.attacks.is_empty() {
+                let none = "この防衛に勝った攻撃は、まだ登録がありません。";
+                // Where an attack's icons would start.
+                let indent = RANK + SP_2 * 3. + widgets::TICK;
+                page = page.child(widgets::quiet(theme, none).ml(indent).py(SP_1));
             }
         }
         page.into_any_element()
+    }
+
+    /// Takes what the user chose against the opponent (`None`: nothing).
+    fn choose(&mut self, choice: Option<Choice>, cx: &mut Context<Self>) {
+        self.core.choose(choice);
+        cx.notify();
     }
 
     /// The battles kept, the latest first: who attacked whom with which students, and who
@@ -971,7 +1005,7 @@ impl Render for Rio {
             self.settings_page(&theme, cx)
         } else {
             match self.tab {
-                Tab::Match => self.match_tab(&theme, window),
+                Tab::Match => self.match_tab(&theme, window, cx),
                 Tab::History => self.history_tab(&theme),
             }
         };

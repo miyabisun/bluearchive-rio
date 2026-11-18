@@ -1,8 +1,8 @@
 //! Rio: without arguments, the window (`app::run`); with arguments, a command.
 //!   bluearchive-rio                       opens the window: watches the game, keeps the battle
-//!                                         records shown, and marks over it what the records counsel
+//!                                         records shown, and marks over it what the user chooses
 //!   bluearchive-rio read <png>...         keeps the records of screenshots
-//!   bluearchive-rio predict <png>...      what the records counsel against a screenshot's opponent
+//!   bluearchive-rio predict <png>...      what the records say against a screenshot's opponent
 //!   bluearchive-rio list                  the battles kept, the latest first
 //!   bluearchive-rio name <player> <name>  names a player
 //!   bluearchive-rio roster                the students held, as Aoi wrote them
@@ -18,13 +18,13 @@ use bluearchive_rio::{
     history::Reader,
     opponent::{self, Front},
     store::{Counsel, Kept, Player, Store},
-    students,
+    students, view,
 };
 
 const USAGE: &str = "使い方:
   bluearchive-rio                         ウィンドウを開き、ゲームを見て戦闘履歴を登録し、編成を案内する
   bluearchive-rio read <png>...           スクリーンショットの戦闘履歴を登録する
-  bluearchive-rio predict <png>...        スクリーンショットの対戦相手の、防衛の予測とおすすめの攻撃
+  bluearchive-rio predict <png>...        スクリーンショットの対戦相手の、防衛の候補と勝った攻撃の候補
   bluearchive-rio list                    登録した戦闘を新しい順に表示する
   bluearchive-rio name <プレイヤー番号> <名前>  プレイヤーに名前を付ける
   bluearchive-rio roster                  Aoi が書き出した手持ちの生徒を表示する";
@@ -85,9 +85,9 @@ fn describe(battle: &Kept, names: &HashMap<i64, String>) -> String {
     )
 }
 
-/// What the records counsel against an opponent's front: the opponent's own last defense
-/// behind it, the strikers seen behind the same first striker and specials (the most seen
-/// first), and the attack that won most against the defense expected.
+/// What the records say against an opponent's front: the defenses that may stand behind
+/// it, the likeliest first, each with why it is likely and the attacks that won against
+/// it. Which to take is the user's to say.
 fn foretell(front: &Front, counsel: &Counsel, names: &HashMap<i64, String>) -> String {
     let name = |student: &i64| {
         names
@@ -95,42 +95,32 @@ fn foretell(front: &Front, counsel: &Counsel, names: &HashMap<i64, String>) -> S
             .cloned()
             .unwrap_or_else(|| format!("生徒#{student}"))
     };
-    let behind = |rest: &[i64; 3]| {
-        let [second, third, fourth] = rest.each_ref().map(name);
-        format!("D2 {second} / D3 {third} / D4 {fourth}")
-    };
     let mut told = format!(
         "対戦相手の防衛: D1 {} | SP {} / SP {}",
         name(&front.first),
         name(&front.specials[0]),
         name(&front.specials[1])
     );
-    if let Some(last) = &counsel.last {
-        told.push_str(&format!("\n  この相手の最後の防衛: {}", behind(last)));
-    }
-    if counsel.seen.is_empty() {
+    if counsel.likely.is_empty() {
         told.push_str("\n  同じ D1 とスペシャルの防衛は、まだ登録がありません");
     }
-    for defense in &counsel.seen {
+    for (at, likely) in counsel.likely.iter().enumerate() {
+        let [second, third, fourth] = likely.rest.each_ref().map(name);
         told.push_str(&format!(
-            "\n  {}回 {} (最後に登録 {})",
-            defense.battles,
-            behind(&defense.rest),
-            defense.last_seen
+            "\n  {}. D2 {second} / D3 {third} / D4 {fourth} （{}）",
+            at + 1,
+            view::basis(likely)
         ));
-    }
-    match (&counsel.attack, counsel.behind()) {
-        (Some(tried), _) => told.push_str(&format!(
-            "\n  おすすめの攻撃 ({}戦{}勝): {}",
-            tried.battles,
-            tried.wins,
-            team(&tried.attack, 'A', names)
-        )),
-        (None, Some(rest)) => told.push_str(&format!(
-            "\n  {} の防衛に勝った攻撃は、まだ登録がありません",
-            behind(&rest)
-        )),
-        (None, None) => {}
+        if likely.attacks.is_empty() {
+            told.push_str("\n     勝った攻撃は、まだ登録がありません");
+        }
+        for tried in &likely.attacks {
+            told.push_str(&format!(
+                "\n     {} {}",
+                view::fared(tried),
+                team(&tried.attack, 'A', names)
+            ));
+        }
     }
     told
 }
@@ -249,7 +239,7 @@ mod tests {
 
     use bluearchive_rio::{
         opponent::Front,
-        store::{Counsel, Kept, Player, Seen, Tried},
+        store::{Counsel, Kept, Likely, Player, Tried},
     };
 
     use super::{describe, foretell};
@@ -272,55 +262,40 @@ mod tests {
     }
 
     #[test]
-    fn the_defenses_seen_behind_a_front_are_told_in_their_order() {
+    fn the_defenses_likely_behind_a_front_are_told_with_the_attacks_against_each() {
         let front = Front {
             first: 7,
             specials: [5, 6],
         };
-        let seen = [
-            Seen {
-                rest: [2, 8, 9],
-                battles: 2,
-                last_seen: "2026-11-17 13:14:04".to_owned(),
-            },
-            Seen {
-                rest: [2, 9, 99],
-                battles: 1,
-                last_seen: "2026-11-16 21:00:00".to_owned(),
-            },
-        ];
-        let mut counsel = Counsel {
-            seen: seen.to_vec(),
-            last: None,
-            attack: None,
+        let likely = |rest, theirs, others: (u32, u32), attacks: Vec<Tried>| Likely {
+            rest,
+            theirs,
+            their_last: (theirs > 0).then(|| "2026-11-17 13:14:04".to_owned()),
+            others: others.0,
+            other_battles: others.1,
+            mine: 0,
+            attacks,
         };
-        assert_eq!(
-            foretell(&front, &counsel, &names()),
-            "対戦相手の防衛: D1 アツコ | SP イロハ / SP ミチル（ドレス）
-  2回 D2 マリナ / D3 トキ / D4 イオリ (最後に登録 2026-11-17 13:14:04)
-  1回 D2 マリナ / D3 イオリ / D4 生徒#99 (最後に登録 2026-11-16 21:00:00)
-  D2 マリナ / D3 トキ / D4 イオリ の防衛に勝った攻撃は、まだ登録がありません"
-        );
-        // The opponent's own last defense is the one expected, and an attack won against it.
-        counsel.last = Some([2, 9, 99]);
-        counsel.attack = Some(Tried {
+        let won = Tried {
             attack: [1, 2, 3, 4, 5, 6],
             wins: 2,
             battles: 3,
-        });
+        };
+        let counsel = Counsel {
+            likely: vec![
+                likely([2, 9, 99], 1, (0, 0), vec![won]),
+                likely([2, 8, 9], 0, (2, 3), Vec::new()),
+            ],
+        };
         assert_eq!(
             foretell(&front, &counsel, &names()),
             "対戦相手の防衛: D1 アツコ | SP イロハ / SP ミチル（ドレス）
-  この相手の最後の防衛: D2 マリナ / D3 イオリ / D4 生徒#99
-  2回 D2 マリナ / D3 トキ / D4 イオリ (最後に登録 2026-11-17 13:14:04)
-  1回 D2 マリナ / D3 イオリ / D4 生徒#99 (最後に登録 2026-11-16 21:00:00)
-  おすすめの攻撃 (3戦2勝): A1 ホシノ / A2 マリナ / A3 ヒビキ（応援団） / A4 ハスミ（水着） | SP イロハ / SP ミチル（ドレス）"
+  1. D2 マリナ / D3 イオリ / D4 生徒#99 （この相手 1戦（最後 11-17 13:14））
+     3戦2勝 A1 ホシノ / A2 マリナ / A3 ヒビキ（応援団） / A4 ハスミ（水着） | SP イロハ / SP ミチル（ドレス）
+  2. D2 マリナ / D3 トキ / D4 イオリ （ほか 2人・3戦）
+     勝った攻撃は、まだ登録がありません"
         );
-        let none = Counsel {
-            seen: Vec::new(),
-            last: None,
-            attack: None,
-        };
+        let none = Counsel { likely: Vec::new() };
         assert_eq!(
             foretell(&front, &none, &names()),
             "対戦相手の防衛: D1 アツコ | SP イロハ / SP ミチル（ドレス）

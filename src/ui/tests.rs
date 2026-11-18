@@ -14,8 +14,8 @@ use crate::{
     app::{Core, Places, Snapshot, UpdateCheck},
     opponent::Front,
     settings::{Settings, ThemeChoice},
-    store::{Counsel, Fought, Kept, Player, Seen, Tried},
-    watch::{Opponent, Screen, Status},
+    store::{Counsel, Fought, Kept, Likely, Player, Tried},
+    watch::{Choice, Opponent, Screen, Status},
 };
 
 /// A folder of its own for each window, so what one keeps no other reads.
@@ -79,37 +79,66 @@ fn click(vcx: &mut VisualTestContext, selector: &str) {
     vcx.run_until_parked();
 }
 
-/// ユウカ in front with イロハ and ミチル（ドレス）; behind her the opponent last stood
-/// マリナ, トキ and イオリ, another defense was seen once, and an attack of ホシノ, マリナ,
-/// ミカ and イオリ with イロハ and アコ won two of three.
+/// The first striker and the specials the opponent's dialog shows: ユウカ with イロハ and
+/// ミチル（ドレス）.
+const FRONT: Front = Front {
+    first: 13010,
+    specials: [20016, 20053],
+};
+/// The strikers of the two defenses likely behind them: マリナ, トキ and イオリ; and
+/// マリナ, イオリ and another.
+const BEHIND: [[i64; 3]; 2] = [[10037, 10062, 10006], [10037, 10006, 10124]];
+/// Two attacks that won against the first: ホシノ, マリナ, ミカ and イオリ with イロハ and
+/// アコ, and one with トキ in ミカ's place.
+const ATTACKS: [[i64; 6]; 2] = [
+    [10005, 10037, 10059, 10006, 20016, 20008],
+    [10005, 10037, 10062, 10006, 20016, 20008],
+];
+
+/// An opponent with the front: the first defense is the opponent's own of two battles, with
+/// the two attacks (two of three won, one of two); the second was used by two other players
+/// and by the user, and no attack won against it.
 fn opponent() -> Opponent {
+    let tried = |attack, wins, battles| Tried {
+        attack,
+        wins,
+        battles,
+    };
+    let own = Likely {
+        rest: BEHIND[0],
+        theirs: 2,
+        their_last: Some("2026-11-17 13:14:04".to_owned()),
+        others: 0,
+        other_battles: 0,
+        mine: 0,
+        attacks: vec![tried(ATTACKS[0], 2, 3), tried(ATTACKS[1], 1, 2)],
+    };
+    let others = Likely {
+        rest: BEHIND[1],
+        theirs: 0,
+        their_last: None,
+        others: 2,
+        other_battles: 3,
+        mine: 4,
+        attacks: Vec::new(),
+    };
     Opponent {
-        front: Front {
-            first: 13010,
-            specials: [20016, 20053],
-        },
+        front: FRONT,
         name: None,
         counsel: Counsel {
-            seen: vec![
-                Seen {
-                    rest: [10037, 10062, 10006],
-                    battles: 2,
-                    last_seen: "2026-11-17 13:14:04".to_owned(),
-                },
-                Seen {
-                    rest: [10037, 10006, 10124],
-                    battles: 1,
-                    last_seen: "2026-11-16 21:00:00".to_owned(),
-                },
-            ],
-            last: Some([10037, 10062, 10006]),
-            attack: Some(Tried {
-                attack: [10005, 10037, 10059, 10006, 20016, 20008],
-                wins: 2,
-                battles: 3,
-            }),
+            likely: vec![own, others],
         },
     }
+}
+
+/// What the user chose of `opponent`: a defense, and an attack against it or none.
+fn choice(rest: [i64; 3], attack: Option<[i64; 6]>) -> Option<Choice> {
+    Some(Choice {
+        front: FRONT,
+        name: None,
+        rest,
+        attack,
+    })
 }
 
 fn battle(id: i64, attacker: Option<&str>, attacker_won: bool) -> Kept {
@@ -136,15 +165,15 @@ fn the_window_waits_for_an_opponent(cx: &mut TestAppContext) {
     assert!(
         shows(
             vcx,
-            "対戦相手を選ぶと、防衛の編成の予測と、おすすめの攻撃がここに出ます。"
+            "対戦相手を選ぶと、防衛の編成の候補と、勝った攻撃の候補がここに出ます。"
         ),
         "what the match tab waits for"
     );
-    assert!(!shows(vcx, "おすすめの攻撃"));
+    assert!(!shows(vcx, "防衛の候補"));
 }
 
 #[gpui::test]
-fn an_opponent_shows_the_defense_expected_and_the_attack_counselled(cx: &mut TestAppContext) {
+fn an_opponent_lists_the_defenses_likely_and_chooses_none(cx: &mut TestAppContext) {
     let (_, core, vcx) = open(cx);
     set(&core, vcx, |snapshot| {
         snapshot.status = Status::Watching(Some(Screen::Opponent));
@@ -156,22 +185,72 @@ fn an_opponent_shows_the_defense_expected_and_the_attack_counselled(cx: &mut Tes
         bounds(vcx, "defense:ユウカ").is_some(),
         "D1 as the game shows"
     );
-    assert!(bounds(vcx, "defense:トキ").is_some(), "D3 as expected");
-    assert!(shows(vcx, "この相手が最後に登録された防衛です。"));
-    assert!(shows(vcx, "おすすめの攻撃"));
-    assert!(shows(vcx, "3戦2勝"));
-    let (first, special) = (
-        bounds(vcx, "attack:ホシノ").expect("A1"),
-        bounds(vcx, "attack:アコ").expect("the second special"),
-    );
-    assert!(first.left() < special.left(), "the team in its order");
-    assert_eq!(first.top(), special.top(), "on one row at this width");
-    assert!(shows(vcx, "ほかに見た防衛"));
     assert!(
-        shows(vcx, "1回"),
-        "the defense seen once, and not the expected one again"
+        bounds(vcx, "defense:?").is_some() && bounds(vcx, "defense:トキ").is_none(),
+        "nobody stands behind her until the user says who"
     );
-    assert!(!shows(vcx, "2回"));
+    assert!(shows(vcx, "防衛の候補"));
+    assert!(shows(vcx, "この相手 2戦（最後 11-17 13:14）"));
+    assert!(shows(vcx, "ほか 2人・3戦、自分の防衛 4戦"));
+    let (first, second) = (
+        bounds(vcx, "candidate:likely-0").expect("the likeliest defense"),
+        bounds(vcx, "candidate:likely-1").expect("the next"),
+    );
+    assert!(first.top() < second.top(), "the likeliest first");
+    // The attacks that won against the first stand under it, the best first.
+    assert!(shows(vcx, "3戦2勝") && shows(vcx, "2戦1勝"));
+    let (best, next) = (
+        bounds(vcx, "candidate:attack-0-0").expect("the best attack"),
+        bounds(vcx, "candidate:attack-0-1").expect("the next"),
+    );
+    assert!(first.top() < best.top() && best.top() < next.top() && next.top() < second.top());
+    assert!(shows(vcx, "この防衛に勝った攻撃は、まだ登録がありません。"));
+    assert_eq!(core.chosen(), None, "nothing is chosen for the user");
+}
+
+#[gpui::test]
+fn a_click_chooses_an_attack_and_the_defense_it_is_against(cx: &mut TestAppContext) {
+    let (_, core, vcx) = open(cx);
+    set(&core, vcx, |snapshot| snapshot.opponent = Some(opponent()));
+    click(vcx, "candidate:attack-0-1");
+    assert_eq!(core.chosen(), choice(BEHIND[0], Some(ATTACKS[1])));
+    assert!(has(vcx, "chosen:attack-0-1") && has(vcx, "chosen:likely-0"));
+    assert!(has(vcx, "candidate:attack-0-0"), "the other attack is not");
+    assert!(
+        bounds(vcx, "defense:トキ").is_some(),
+        "the defense chosen stands behind the front"
+    );
+    // The other attack against the same defense takes its place.
+    click(vcx, "candidate:attack-0-0");
+    assert_eq!(core.chosen(), choice(BEHIND[0], Some(ATTACKS[0])));
+    // Clicked again, an attack is no longer chosen: its defense still is.
+    click(vcx, "chosen:attack-0-0");
+    assert_eq!(core.chosen(), choice(BEHIND[0], None));
+    assert!(has(vcx, "chosen:likely-0") && has(vcx, "candidate:attack-0-0"));
+    // A defense's own row chooses the defense alone, and gives it up again.
+    click(vcx, "candidate:likely-1");
+    assert_eq!(core.chosen(), choice(BEHIND[1], None));
+    assert!(has(vcx, "chosen:likely-1") && has(vcx, "candidate:likely-0"));
+    click(vcx, "chosen:likely-1");
+    assert_eq!(core.chosen(), None);
+    assert!(bounds(vcx, "defense:?").is_some());
+}
+
+#[gpui::test]
+fn what_was_chosen_against_one_opponent_is_not_chosen_against_another(cx: &mut TestAppContext) {
+    let (_, core, vcx) = open(cx);
+    set(&core, vcx, |snapshot| snapshot.opponent = Some(opponent()));
+    click(vcx, "candidate:attack-0-0");
+    assert!(has(vcx, "chosen:attack-0-0"));
+    // Another opponent, whose front the same defenses are likely behind.
+    set(&core, vcx, |snapshot| {
+        let mut other = opponent();
+        other.front.first = 10005;
+        snapshot.opponent = Some(other);
+    });
+    assert!(has(vcx, "candidate:likely-0") && has(vcx, "candidate:attack-0-0"));
+    assert!(!has(vcx, "chosen:likely-0") && !has(vcx, "chosen:attack-0-0"));
+    assert!(bounds(vcx, "defense:?").is_some());
 }
 
 #[gpui::test]
@@ -179,11 +258,7 @@ fn a_front_never_seen_says_so(cx: &mut TestAppContext) {
     let (_, core, vcx) = open(cx);
     set(&core, vcx, |snapshot| {
         let mut unseen = opponent();
-        unseen.counsel = Counsel {
-            seen: Vec::new(),
-            last: None,
-            attack: None,
-        };
+        unseen.counsel = Counsel { likely: Vec::new() };
         snapshot.opponent = Some(unseen);
     });
     assert!(shows(
@@ -191,7 +266,7 @@ fn a_front_never_seen_says_so(cx: &mut TestAppContext) {
         "同じ D1 とスペシャルの防衛は、まだ登録がありません。"
     ));
     assert!(bounds(vcx, "defense:?").is_some(), "nobody is expected");
-    assert!(!shows(vcx, "おすすめの攻撃"), "no attack without a defense");
+    assert!(!shows(vcx, "防衛の候補"), "no candidates without a defense");
 }
 
 #[gpui::test]

@@ -15,7 +15,7 @@ use futures::channel::mpsc::UnboundedSender;
 use crate::{
     store::Kept,
     update,
-    watch::{self, Opponent, Status, Update},
+    watch::{self, Choice, Opponent, Status, Update},
 };
 
 /// Everything the window shows.
@@ -111,12 +111,14 @@ pub fn restart() -> ! {
     std::process::exit(0);
 }
 
-/// What the window works with: the snapshot the reading keeps current. Every change is
-/// signalled, so the window takes the new snapshot.
+/// What the window works with: the snapshot the reading keeps current, and what the user
+/// chose in the window for the reading to mark over the game. Every change is signalled,
+/// so the window takes the new snapshot.
 pub struct Core {
     latest: Mutex<Snapshot>,
     pub places: Places,
     paused: Arc<AtomicBool>,
+    chosen: Arc<Mutex<Option<Choice>>>,
     changed: UnboundedSender<()>,
 }
 
@@ -126,8 +128,24 @@ impl Core {
             latest: Mutex::new(Snapshot::starting()),
             places,
             paused: Arc::new(AtomicBool::new(false)),
+            chosen: Arc::default(),
             changed,
         }
+    }
+
+    /// Takes what the user chose against an opponent (`None`: nothing), for the window to
+    /// show and the reading to mark.
+    pub fn choose(&self, choice: Option<Choice>) {
+        *self.chosen.lock().unwrap_or_else(PoisonError::into_inner) = choice;
+        let _ = self.changed.unbounded_send(());
+    }
+
+    /// What the user chose last.
+    pub fn chosen(&self) -> Option<Choice> {
+        self.chosen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Starts reading the game.
@@ -136,6 +154,7 @@ impl Core {
         watch::start(
             self.places.database.clone(),
             self.paused.clone(),
+            self.chosen.clone(),
             move |status, update| {
                 if let Some(core) = core.upgrade() {
                     core.update(|snapshot| snapshot.apply(status, update));
@@ -197,11 +216,7 @@ mod tests {
                 specials: [2, 3],
             },
             name: None,
-            counsel: Counsel {
-                seen: Vec::new(),
-                last: None,
-                attack: None,
-            },
+            counsel: Counsel { likely: Vec::new() },
         };
         let watching = Status::Watching(Some(Screen::Opponent));
         snapshot.apply(watching.clone(), Some(Update::Opponent(opponent.clone())));

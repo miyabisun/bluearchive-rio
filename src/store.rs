@@ -69,15 +69,6 @@ pub struct Player {
     pub plate: Vec<u8>,
 }
 
-/// A defense seen before behind a first striker and two specials: the strikers D2 to D4,
-/// the battles that showed them so, and when the last of those was seen.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Seen {
-    pub rest: [i64; 3],
-    pub battles: u32,
-    pub last_seen: String,
-}
-
 /// An attack kept against one defense: the team, the battles it won and all its battles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tried {
@@ -86,23 +77,102 @@ pub struct Tried {
     pub battles: u32,
 }
 
-/// What the records say against an opponent's front.
+/// A defense that may stand behind an opponent's front: the strikers D2 to D4, what the
+/// records say for it, and the attacks to try against it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Counsel {
-    /// The defenses seen behind the front, any player's, the most seen first.
-    pub seen: Vec<Seen>,
-    /// What stood behind it when the opponent last defended so.
-    pub last: Option<[i64; 3]>,
-    /// The attack that won most against the defense expected, of those that won at all.
-    pub attack: Option<Tried>,
+pub struct Likely {
+    pub rest: [i64; 3],
+    /// The battles the opponent defended so, and when the last of them was kept.
+    pub theirs: u32,
+    pub their_last: Option<String>,
+    /// The other players who defended so (neither the opponent nor the user; an anonymous
+    /// defender counts as one for each battle), and the battles they did.
+    pub others: u32,
+    pub other_battles: u32,
+    /// The battles the user defended so.
+    pub mine: u32,
+    /// The attacks that won against it at least once, the best first, `SHOWN` at most.
+    pub attacks: Vec<Tried>,
 }
 
-impl Counsel {
-    /// The strikers expected behind the front: the opponent's own last defense, or else
-    /// the defense seen most.
-    pub fn behind(&self) -> Option<[i64; 3]> {
-        self.last.or(self.seen.first().map(|seen| seen.rest))
+/// How many candidates a counsel lists: of the defenses, and of the attacks against each.
+pub const SHOWN: usize = 5;
+
+/// What the records say against an opponent's front: the defenses that may stand behind
+/// it, the likeliest first, `SHOWN` at most. Which of them does, and which attack to take,
+/// is the user's to say: most defenses kept are the user's own (every attack on the user
+/// shows it), so the one seen most says little of an opponent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Counsel {
+    pub likely: Vec<Likely>,
+}
+
+/// A battle behind a front, for telling the defenses likely there: who defended, with whom
+/// behind the first striker, and when it was kept.
+struct Defended {
+    defender: Option<i64>,
+    rest: [i64; 3],
+    seen_at: String,
+}
+
+/// The defenses of `defended` (in the order kept), the likeliest first: those the
+/// `opponent` used, the one kept last first; then those of other players, by how many
+/// players used them, then by their battles, then the one kept last; then those only the
+/// user (`me`) used, the one kept last first. The user's own battles raise no defense.
+fn likely(defended: &[Defended], opponent: Option<i64>, me: Option<i64>) -> Vec<Likely> {
+    // For each defense: what is told of it, where it was last seen of the opponent, of
+    // others and of the user, and the other players that used it.
+    type Found = (Likely, [Option<usize>; 3], Vec<i64>);
+    let mut found: Vec<Found> = Vec::new();
+    for (at, battle) in defended.iter().enumerate() {
+        let known = found
+            .iter()
+            .position(|(likely, ..)| likely.rest == battle.rest);
+        let known = known.unwrap_or_else(|| {
+            let fresh = Likely {
+                rest: battle.rest,
+                theirs: 0,
+                their_last: None,
+                others: 0,
+                other_battles: 0,
+                mine: 0,
+                attacks: Vec::new(),
+            };
+            found.push((fresh, [None; 3], Vec::new()));
+            found.len() - 1
+        });
+        let (likely, last, players) = &mut found[known];
+        match battle.defender {
+            Some(defender) if Some(defender) == opponent => {
+                likely.theirs += 1;
+                likely.their_last = Some(battle.seen_at.clone());
+                last[0] = Some(at);
+            }
+            Some(defender) if Some(defender) == me => {
+                likely.mine += 1;
+                last[2] = Some(at);
+            }
+            defender => {
+                likely.other_battles += 1;
+                last[1] = Some(at);
+                if defender.is_none_or(|defender| !players.contains(&defender)) {
+                    likely.others += 1;
+                    players.extend(defender);
+                }
+            }
+        }
     }
+    found.sort_by_key(|(likely, last, _)| {
+        let most = std::cmp::Reverse;
+        if likely.theirs > 0 {
+            (0, most((0, 0, last[0])))
+        } else if likely.others > 0 {
+            (1, most((likely.others, likely.other_battles, last[1])))
+        } else {
+            (2, most((0, 0, last[2])))
+        }
+    });
+    found.into_iter().map(|(likely, ..)| likely).collect()
 }
 
 pub struct Store(Connection);
@@ -132,7 +202,8 @@ impl Store {
                 defender INTEGER REFERENCES players (id),
                 attacker_won INTEGER NOT NULL,
                 {slots}
-                fingerprint TEXT NOT NULL UNIQUE
+                fingerprint TEXT NOT NULL UNIQUE,
+                user_attacked INTEGER
             );
             CREATE TABLE IF NOT EXISTS list_rows (
                 id INTEGER PRIMARY KEY,
@@ -145,6 +216,16 @@ impl Store {
                 battle INTEGER UNIQUE REFERENCES battles (id)
             );"
         ))?;
+        // Which side of a battle the user's own is, is kept since 0.1.11: an older database
+        // gains the column, empty for the battles it holds.
+        let sided: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('battles') WHERE name = 'user_attacked'",
+            [],
+            |row| row.get(0),
+        )?;
+        if sided == 0 {
+            connection.execute_batch("ALTER TABLE battles ADD COLUMN user_attacked INTEGER")?;
+        }
         // The versions 0.1.4 to 0.1.7 kept the rows at places in one line (`listed`), some
         // of them wrong. What a record told of a row is taken over, each row by itself
         // (the upper first); where the rows stand is seen anew. A record that has its row
@@ -208,9 +289,11 @@ impl Store {
         let fighters = battle.attacker.team.iter().chain(&battle.defender.team);
         values.extend(fighters.map(|fighter| Value::from(fighter.student)));
         values.push(fingerprint.into());
+        values.push(battle.user_attacked.into());
         let marks = vec!["?"; values.len()].join(", ");
         let sql = format!(
-            "INSERT INTO battles (attacker, defender, attacker_won, {}, fingerprint)
+            "INSERT INTO battles (attacker, defender, attacker_won, {}, fingerprint,
+                                  user_attacked)
              VALUES ({marks})",
             SLOTS.join(", ")
         );
@@ -387,24 +470,27 @@ impl Store {
         Ok(None)
     }
 
-    /// What stood behind a first striker and specials in the last battle kept of those a
-    /// player defended so. "Last" is the last Rio saw: the game tells no battle's time.
-    pub fn last_defense(
-        &self,
-        player: i64,
-        first: i64,
-        mut specials: [i64; 2],
-    ) -> rusqlite::Result<Option<[i64; 3]>> {
-        specials.sort_unstable();
-        self.0
-            .query_row(
-                "SELECT d2, d3, d4 FROM battles
-                 WHERE defender = ?1 AND d1 = ?2 AND dsp1 = ?3 AND dsp2 = ?4
-                 ORDER BY id DESC LIMIT 1",
-                [player, first, specials[0], specials[1]],
-                |row| Ok([row.get(0)?, row.get(1)?, row.get(2)?]),
-            )
-            .optional()
+    /// The user's own player: the one on the user's side of the battle kept last that
+    /// tells its side. Of battles kept before the side was (0.1.10 and older), the player
+    /// in the most of them: every record shows the user.
+    pub fn me(&self) -> rusqlite::Result<Option<i64>> {
+        let told = self.0.query_row(
+            "SELECT CASE WHEN user_attacked THEN attacker ELSE defender END FROM battles
+             WHERE user_attacked IS NOT NULL ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        );
+        if let Some(me) = told.optional()?.flatten() {
+            return Ok(Some(me));
+        }
+        let most = self.0.query_row(
+            "SELECT player FROM (
+                 SELECT attacker AS player FROM battles UNION ALL SELECT defender FROM battles
+             ) WHERE player IS NOT NULL GROUP BY player ORDER BY COUNT(*) DESC, player LIMIT 1",
+            [],
+            |row| row.get(0),
+        );
+        most.optional()
     }
 
     /// The attacks kept against a defense (D1 to D4, then the specials), the one that won
@@ -432,36 +518,49 @@ impl Store {
             .collect()
     }
 
-    /// What the records say against a front: the defense to expect behind it, and the
-    /// attack to try. `opponent` is the opponent's name where the game shows one; of the
-    /// attacks, only teams of the students `held` are taken, where the roster is known.
+    /// What the records say against a front: the defenses that may stand behind it (see
+    /// `likely`), each with the attacks that won against it. `opponent` is the opponent's
+    /// name where the game shows one; of the attacks, only teams of the students `held` are
+    /// taken, where the roster is known.
     pub fn counsel(
         &self,
         front: &Front,
         opponent: Option<&Plate>,
         held: Option<&[i64]>,
     ) -> rusqlite::Result<Counsel> {
-        let player = match opponent {
+        let opponent = match opponent {
             Some(plate) => self.known(plate)?,
             None => None,
         };
-        let mut counsel = Counsel {
-            seen: self.defenses(front.first, front.specials)?,
-            last: match player {
-                Some(player) => self.last_defense(player, front.first, front.specials)?,
-                None => None,
-            },
-            attack: None,
-        };
-        if let Some([second, third, fourth]) = counsel.behind() {
-            let [left, right] = front.specials;
+        let mut specials = front.specials;
+        specials.sort_unstable();
+        // Only defenses are looked at: an attack's field differs.
+        let mut defended = self.0.prepare(
+            "SELECT defender, d2, d3, d4, seen_at FROM battles
+             WHERE d1 = ?1 AND dsp1 = ?2 AND dsp2 = ?3 ORDER BY id",
+        )?;
+        let defended: Vec<Defended> = defended
+            .query_map([front.first, specials[0], specials[1]], |row| {
+                Ok(Defended {
+                    defender: row.get(0)?,
+                    rest: [row.get(1)?, row.get(2)?, row.get(3)?],
+                    seen_at: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut likely = likely(&defended, opponent, self.me()?);
+        likely.truncate(SHOWN);
+        for defense in &mut likely {
+            let [second, third, fourth] = defense.rest;
+            let [left, right] = specials;
             let tried = self.attacks([front.first, second, third, fourth, left, right])?;
-            counsel.attack = tried.into_iter().find(|tried| {
+            let fit = |tried: &Tried| {
                 tried.wins > 0
                     && held.is_none_or(|held| tried.attack.iter().all(|one| held.contains(one)))
-            });
+            };
+            defense.attacks = tried.into_iter().filter(fit).take(SHOWN).collect();
         }
-        Ok(counsel)
+        Ok(Counsel { likely })
     }
 
     /// The battles kept, the latest first.
@@ -510,27 +609,6 @@ impl Store {
                         (Some(about), Some(within)) => Some(Fought { about, within }),
                         _ => None,
                     },
-                })
-            })?
-            .collect()
-    }
-
-    /// The defenses kept whose first striker and specials are these, the most seen first:
-    /// what stood behind them. Only defenses are looked at: an attack's field differs.
-    pub fn defenses(&self, first: i64, mut specials: [i64; 2]) -> rusqlite::Result<Vec<Seen>> {
-        specials.sort_unstable();
-        let mut defenses = self.0.prepare(
-            "SELECT d2, d3, d4, COUNT(*), MAX(seen_at) FROM battles
-             WHERE d1 = ?1 AND dsp1 = ?2 AND dsp2 = ?3
-             GROUP BY d2, d3, d4
-             ORDER BY COUNT(*) DESC, MAX(seen_at) DESC, d2, d3, d4",
-        )?;
-        defenses
-            .query_map([first, specials[0], specials[1]], |row| {
-                Ok(Seen {
-                    rest: [row.get(0)?, row.get(1)?, row.get(2)?],
-                    battles: row.get(3)?,
-                    last_seen: row.get(4)?,
                 })
             })?
             .collect()
@@ -775,33 +853,6 @@ mod tests {
     }
 
     #[test]
-    fn the_defenses_behind_a_first_striker_are_counted() {
-        let store = store();
-        // The same defense twice, one with another second striker, one of another first.
-        store.save(&battle(100)).unwrap();
-        store.save(&battle(200)).unwrap();
-        let mut other = battle(300);
-        other.defender.team[1].student = 29001;
-        store.save(&other).unwrap();
-        let mut apart = battle(400);
-        apart.defender.team[0].student = 29999;
-        store.save(&apart).unwrap();
-
-        // The specials are asked for in either order.
-        let seen = store.defenses(20000, [20005, 20004]).unwrap();
-        let counted: Vec<_> = seen.iter().map(|seen| (seen.rest, seen.battles)).collect();
-        assert_eq!(
-            counted,
-            [([20001, 20002, 20003], 2), ([29001, 20002, 20003], 1)]
-        );
-        assert!(seen.iter().all(|seen| !seen.last_seen.is_empty()));
-        assert!(
-            store.defenses(10000, [10004, 10005]).unwrap().is_empty(),
-            "an attack is not counted as a defense"
-        );
-    }
-
-    #[test]
     fn a_player_is_known_by_the_name_drawn() {
         let store = store();
         store.save(&battle(100)).unwrap();
@@ -809,32 +860,6 @@ mod tests {
         assert_eq!(store.known(&plate(5)).unwrap(), Some(defender));
         assert_eq!(store.known(&plate(7)).unwrap(), None, "a name not met");
         assert!(!store.name(3, "だれか").unwrap(), "asking makes no player");
-    }
-
-    #[test]
-    fn the_last_defense_of_a_player_is_told() {
-        let store = store();
-        store.save(&battle(100)).unwrap();
-        let mut later = battle(200);
-        later.defender.team[2].student = 29002;
-        store.save(&later).unwrap();
-        // Another player's defense behind the same front, kept last.
-        let mut other = battle(300);
-        other.defender.plate = Some(plate(3));
-        other.defender.team[3].student = 29003;
-        store.save(&other).unwrap();
-
-        let defender = store.known(&plate(5)).unwrap().expect("the defender");
-        assert_eq!(
-            store.last_defense(defender, 20000, [20005, 20004]).unwrap(),
-            Some([20001, 29002, 20003]),
-            "the player's own defense, the one kept last"
-        );
-        assert_eq!(
-            store.last_defense(defender, 29999, [20004, 20005]).unwrap(),
-            None,
-            "another first striker"
-        );
     }
 
     #[test]
@@ -866,70 +891,196 @@ mod tests {
         assert_eq!(tried[1].attack, [10000, 10001, 10002, 10003, 10004, 10005]);
     }
 
-    #[test]
-    fn the_counsel_prefers_the_players_own_defense_and_a_team_held() {
-        let store = store();
-        // The defense seen most behind the front is another player's.
-        for damage in [100, 200, 250] {
-            let mut common = battle(damage);
-            common.defender.plate = Some(plate(3));
-            store.save(&common).unwrap();
-        }
-        let mut own = battle(300);
-        own.defender.team[1].student = 29001;
-        store.save(&own).unwrap();
-        // Against the player's own defense, a team with a student not held won too.
-        let mut rich = battle(400);
-        rich.defender.team[1].student = 29001;
-        rich.attacker.team[0].student = 19000;
-        store.save(&rich).unwrap();
+    /// The front of the defenses these tests keep.
+    const FRONT: Front = Front {
+        first: 20000,
+        specials: [20004, 20005],
+    };
 
-        let front = Front {
-            first: 20000,
-            specials: [20004, 20005],
-        };
-        let held: Vec<i64> = (10000..10006).collect();
-        let counsel = store.counsel(&front, Some(&plate(5)), Some(&held)).unwrap();
-        assert_eq!(
-            counsel.behind(),
-            Some([29001, 20002, 20003]),
-            "the player's"
-        );
-        assert_eq!(
-            counsel.attack.as_ref().map(|tried| tried.attack[0]),
-            Some(10000),
-            "the team held"
-        );
-        // A player not met, and no roster: the defense seen most, and any winning team.
-        let counsel = store.counsel(&front, Some(&plate(7)), None).unwrap();
-        assert_eq!(counsel.last, None);
-        assert_eq!(
-            counsel.behind(),
-            Some([20001, 20002, 20003]),
-            "the most seen"
-        );
-        assert!(counsel.attack.is_some(), "the attack that won against it");
-        // A front never seen.
-        let unseen = Front { first: 1, ..front };
-        let counsel = store.counsel(&unseen, None, None).unwrap();
-        assert_eq!((counsel.behind(), counsel.attack), (None, None));
+    /// A battle the user (the name of two strokes) won attacking the player of a name of
+    /// `defender` strokes, whose second striker is `second`.
+    fn against(damage: u32, defender: u32, second: i64) -> Battle {
+        let mut battle = battle(damage);
+        battle.defender.plate = Some(plate(defender));
+        battle.defender.team[1].student = second;
+        battle
     }
 
     #[test]
-    fn an_attack_that_never_won_is_not_counselled() {
+    fn the_user_is_the_player_on_the_records_own_side() {
         let store = store();
+        assert_eq!(store.me().unwrap(), None, "no record yet");
+        store.save(&against(100, 5, 20001)).unwrap();
+        let me = store.known(&plate(2)).unwrap();
+        assert_eq!(
+            store.me().unwrap(),
+            me,
+            "the attacker of a record the user attacked in"
+        );
+        // Attacked by the same player: the user is the defender there.
+        let mut attacked = against(200, 2, 20001);
+        attacked.attacker.plate = Some(plate(5));
+        attacked.user_attacked = false;
+        store.save(&attacked).unwrap();
+        assert_eq!(store.me().unwrap(), me);
+        // Records kept before the side was: the player in the most of them.
+        store.save(&against(300, 3, 20001)).unwrap();
+        store
+            .0
+            .execute_batch("UPDATE battles SET user_attacked = NULL")
+            .unwrap();
+        assert_eq!(store.me().unwrap(), me);
+    }
+
+    #[test]
+    fn the_defenses_likely_behind_a_front_are_the_opponents_then_others_then_the_users() {
+        let store = store();
+        // The user's own defense behind the same front, attacked five times: more records
+        // than of any other defense.
+        for damage in [10, 20, 30, 40, 50] {
+            let mut own = against(damage, 2, 28001);
+            own.attacker.plate = Some(plate(6));
+            own.user_attacked = false;
+            store.save(&own).unwrap();
+        }
+        // The opponent's own; a defense two other players used, one of them twice; and one
+        // a third player used, kept last.
+        store.save(&against(100, 5, 29001)).unwrap();
+        store.save(&against(200, 3, 20001)).unwrap();
+        store.save(&against(300, 3, 20001)).unwrap();
+        store.save(&against(400, 4, 20001)).unwrap();
+        store.save(&against(500, 1, 29009)).unwrap();
+
+        let told = |opponent: Option<&Plate>| -> Vec<(i64, u32, u32, u32, u32)> {
+            let counsel = store.counsel(&FRONT, opponent, None).unwrap();
+            let told = |likely: &super::Likely| {
+                let (others, battles) = (likely.others, likely.other_battles);
+                (likely.rest[0], likely.theirs, others, battles, likely.mine)
+            };
+            counsel.likely.iter().map(told).collect()
+        };
+        assert_eq!(
+            told(Some(&plate(5))),
+            [
+                (29001, 1, 0, 0, 0),
+                (20001, 0, 2, 3, 0),
+                (29009, 0, 1, 1, 0),
+                (28001, 0, 0, 0, 5)
+            ],
+            "the user's five battles raise nothing"
+        );
+        let counsel = store.counsel(&FRONT, Some(&plate(5)), None).unwrap();
+        assert!(counsel.likely[0].their_last.is_some());
+        assert_eq!(counsel.likely[0].rest, [29001, 20002, 20003]);
+        // To a player not met, and to one without a name, the opponent's defense is one of
+        // the others': of two used by one player each, the one kept last comes first.
+        let others = [20001, 29009, 29001, 28001];
+        for opponent in [Some(plate(7)), None] {
+            let first: Vec<i64> = told(opponent.as_ref()).iter().map(|told| told.0).collect();
+            assert_eq!(first, others);
+        }
+        // Another front: nothing.
+        let unseen = Front { first: 1, ..FRONT };
+        assert!(
+            store
+                .counsel(&unseen, None, None)
+                .unwrap()
+                .likely
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn five_defenses_at_most_are_told_and_an_anonymous_defender_is_one_each_battle() {
+        let store = store();
+        // Seven defenses of anonymous players, the fourth one twice.
+        for (damage, second) in [
+            (1, 31),
+            (2, 32),
+            (3, 33),
+            (4, 34),
+            (5, 34),
+            (6, 35),
+            (7, 36),
+            (8, 37),
+        ] {
+            let mut battle = against(damage * 100, 5, second);
+            battle.defender.plate = None;
+            store.save(&battle).unwrap();
+        }
+        let counsel = store.counsel(&FRONT, None, None).unwrap();
+        let told: Vec<(i64, u32)> = counsel
+            .likely
+            .iter()
+            .map(|likely| (likely.rest[0], likely.others))
+            .collect();
+        assert_eq!(told, [(34, 2), (37, 1), (36, 1), (35, 1), (33, 1)]);
+    }
+
+    #[test]
+    fn a_likely_defense_comes_with_the_attacks_that_won_against_it() {
+        let store = store();
+        // One attack wins once and loses once; one with a student not held wins its only
+        // battle; one never won.
+        store.save(&battle(100)).unwrap();
         let lost = Battle {
             attacker_won: false,
-            ..battle(100)
+            ..battle(200)
         };
         store.save(&lost).unwrap();
-        let front = Front {
-            first: 20000,
-            specials: [20004, 20005],
+        let mut rich = battle(300);
+        rich.attacker.team[0].student = 19000;
+        store.save(&rich).unwrap();
+        let mut never = battle(400);
+        never.attacker.team[1].student = 18000;
+        never.attacker_won = false;
+        store.save(&never).unwrap();
+
+        let attacks = |held: Option<&[i64]>| -> Vec<(i64, u32, u32)> {
+            let counsel = store.counsel(&FRONT, None, held).unwrap();
+            let tried = counsel.likely[0].attacks.iter();
+            tried
+                .map(|tried| (tried.attack[0], tried.wins, tried.battles))
+                .collect()
         };
-        let counsel = store.counsel(&front, None, None).unwrap();
-        assert_eq!(counsel.behind(), Some([20001, 20002, 20003]));
-        assert_eq!(counsel.attack, None);
+        assert_eq!(attacks(None), [(19000, 1, 1), (10000, 1, 2)]);
+        let held: Vec<i64> = (10000..10006).collect();
+        assert_eq!(attacks(Some(&held)), [(10000, 1, 2)], "the team held");
+        // Six more attacks that won: five are told.
+        for student in 17000..17006 {
+            let mut more = battle(student as u32);
+            more.attacker.team[2].student = student;
+            store.save(&more).unwrap();
+        }
+        assert_eq!(attacks(None).len(), 5);
+    }
+
+    #[test]
+    fn a_database_kept_before_the_users_side_was_told_gains_it() {
+        // The battles of a database as the version 0.1.10 made it.
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        let slots: String = super::SLOTS
+            .iter()
+            .map(|slot| format!("{slot} INTEGER NOT NULL, "))
+            .collect();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE battles (
+                     id INTEGER PRIMARY KEY,
+                     seen_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                     attacker INTEGER, defender INTEGER, attacker_won INTEGER NOT NULL,
+                     {slots} fingerprint TEXT NOT NULL UNIQUE
+                 );"
+            ))
+            .unwrap();
+        let store = Store::prepared(connection).unwrap();
+        assert!(store.keep(&battle(100)).unwrap().new);
+        assert_eq!(store.me().unwrap(), store.known(&plate(2)).unwrap());
+        // Opened again, the column is there.
+        assert_eq!(
+            Store::prepared(store.0).unwrap().battles().unwrap().len(),
+            1
+        );
     }
 
     #[test]

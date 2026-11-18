@@ -85,6 +85,47 @@ pub fn choice(theme: &Theme, id: &str, label: &str, checked: bool) -> Stateful<D
         .child(label.to_owned())
 }
 
+/// The room of a tick before a choice or a candidate.
+pub const TICK: gpui::Pixels = px(14. * 1.4);
+
+/// A candidate the user may choose, as a row: a tick before the chosen one, its room kept
+/// before the others (as `choice`), then what the caller puts into the row. A button that
+/// stays pressed, not a radio button: pressed again, the candidate is given up. The tests
+/// find it as `chosen:<id>` or `candidate:<id>`.
+pub fn candidate(theme: &Theme, id: &str, label: &str, chosen: bool) -> Stateful<Div> {
+    let hover = theme.wash_base;
+    let selector = format!("{}:{id}", if chosen { "chosen" } else { "candidate" });
+    div()
+        .id(SharedString::from(format!("candidate-{id}")))
+        .debug_selector(move || selector.clone())
+        .role(Role::Button)
+        .aria_label(label.to_owned())
+        .aria_toggled(if chosen {
+            gpui::Toggled::True
+        } else {
+            gpui::Toggled::False
+        })
+        .tab_stop(true)
+        .flex()
+        .items_center()
+        .gap(SP_2)
+        .px(SP_2)
+        .py(SP_1)
+        .rounded(RADIUS_SM)
+        .text_size(FS_SM)
+        .text_color(theme.on_surface)
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .focus(move |s| s.bg(hover))
+        .child(
+            div()
+                .w(TICK)
+                .flex_none()
+                .when(!chosen, gpui::Styled::invisible)
+                .child("✓"),
+        )
+}
+
 /// A failure in the page: danger on danger-subtle.
 pub fn error(theme: &Theme, id: &str, message: impl Into<SharedString>) -> Stateful<Div> {
     let message = message.into();

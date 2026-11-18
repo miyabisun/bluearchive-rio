@@ -5,8 +5,9 @@
 //! too (`listing`), and a record is the battle of the row it was opened from (what was told
 //! of them is written down, `trail`). Before a battle
 //! it reads what the opponent's dialog shows of the defense (`opponent`), to look up what
-//! stood behind it in the records; in the formation dialog (`formation`) it marks over the
-//! game (`guide`, `overlay`) the students of the attack that won most against that defense.
+//! may stand behind it in the records and which attacks won against that; the user chooses
+//! among them in the window, and in the formation dialog (`formation`) Rio marks over the
+//! game (`guide`, `overlay`) the students of the attack chosen.
 //! The reading runs in a thread (`watch`) and shows in a window (`app`, `ui`, `view`) made as
 //! Aoi's.
 
