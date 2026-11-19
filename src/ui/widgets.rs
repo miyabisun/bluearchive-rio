@@ -94,10 +94,8 @@ pub const TICK: gpui::Pixels = px(14. * 1.4);
 /// find it as `chosen:<id>` or `candidate:<id>`.
 pub fn candidate(theme: &Theme, id: &str, label: &str, chosen: bool) -> Stateful<Div> {
     let hover = theme.wash_base;
-    let selector = format!("{}:{id}", if chosen { "chosen" } else { "candidate" });
-    div()
-        .id(SharedString::from(format!("candidate-{id}")))
-        .debug_selector(move || selector.clone())
+    let kind = if chosen { "chosen" } else { "candidate" };
+    row(id, kind)
         .role(Role::Button)
         .aria_label(label.to_owned())
         .aria_toggled(if chosen {
@@ -106,13 +104,6 @@ pub fn candidate(theme: &Theme, id: &str, label: &str, chosen: bool) -> Stateful
             gpui::Toggled::False
         })
         .tab_stop(true)
-        .flex()
-        .items_center()
-        .gap(SP_2)
-        .px(SP_2)
-        .py(SP_1)
-        .rounded(RADIUS_SM)
-        .text_size(FS_SM)
         .text_color(theme.on_surface)
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
@@ -124,6 +115,33 @@ pub fn candidate(theme: &Theme, id: &str, label: &str, chosen: bool) -> Stateful
                 .when(!chosen, gpui::Styled::invisible)
                 .child("✓"),
         )
+}
+
+/// A candidate set aside, which the user cannot choose: `candidate`'s row in muted words,
+/// the tick's room kept so its icons stand under the others', without the hand, the hover
+/// or the press. `why` tells what sets it aside. The tests find it as `excluded:<id>`.
+pub fn set_aside(theme: &Theme, id: &str, label: &str, why: &str) -> Stateful<Div> {
+    row(id, "excluded")
+        .role(Role::Group)
+        .aria_label(label.to_owned())
+        .aria_description(why.to_owned())
+        .text_color(theme.muted)
+        .child(div().w(TICK).flex_none())
+}
+
+/// The row of a candidate, found by the tests as `<kind>:<id>`.
+fn row(id: &str, kind: &str) -> Stateful<Div> {
+    let selector = format!("{kind}:{id}");
+    div()
+        .id(SharedString::from(format!("candidate-{id}")))
+        .debug_selector(move || selector.clone())
+        .flex()
+        .items_center()
+        .gap(SP_2)
+        .px(SP_2)
+        .py(SP_1)
+        .rounded(RADIUS_SM)
+        .text_size(FS_SM)
 }
 
 /// A failure in the page: danger on danger-subtle.

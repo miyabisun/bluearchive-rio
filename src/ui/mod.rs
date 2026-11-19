@@ -23,17 +23,18 @@ use std::{
 use futures::{StreamExt as _, channel::mpsc};
 use gpui::{
     AnyElement, App, AppContext as _, AsyncApp, Bounds, Context, FocusHandle, Focusable,
-    FontWeight, InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Pixels,
-    Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
-    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowOptions, actions, div, img, point,
-    prelude::FluentBuilder as _, px, size,
+    FontWeight, InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
+    ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, TitlebarOptions,
+    WeakEntity, Window, WindowBounds, WindowOptions, actions, anchored, deferred, div, img, point,
+    prelude::FluentBuilder as _, px, size, svg,
 };
 
 use crate::{
     app::{Core, Places, Snapshot, UpdateCheck, VERSION},
     settings::{Placement, Settings, ThemeChoice},
     store::{Kept, Player},
-    view::{self, UpdateState},
+    view::{self, Out, UpdateState},
     watch::{Choice, Status},
 };
 
@@ -68,6 +69,8 @@ const TEAM_GAPS: f32 = 68.;
 const PLATE: Pixels = px(20.);
 /// The room of a candidate's rank before its row.
 const RANK: Pixels = px(16.);
+/// How much of an icon's picture shows in an attack set aside.
+const FAINT: f32 = 0.45;
 
 /// The tabs, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -77,15 +80,18 @@ pub enum Tab {
     Match,
     /// The battles kept.
     History,
+    /// The students the user keeps out of their attacks (編成NG).
+    Barred,
 }
 
 impl Tab {
-    pub const ALL: [Self; 2] = [Self::Match, Self::History];
+    pub const ALL: [Self; 3] = [Self::Match, Self::History, Self::Barred];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Match => "対戦",
             Self::History => "履歴",
+            Self::Barred => "編成NG",
         }
     }
 
@@ -93,6 +99,7 @@ impl Tab {
         match self {
             Self::Match => "match",
             Self::History => "history",
+            Self::Barred => "barred",
         }
     }
 }
@@ -104,6 +111,17 @@ struct Seat {
     student: Option<i64>,
     /// Expected from the records, not shown by the game.
     guessed: bool,
+}
+
+/// How a student's icon stands in an attack.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    Plain,
+    /// In an attack set aside: grey and faint.
+    Faint,
+    /// The student an attack is set aside for: grey and faint, in a frame of danger with a
+    /// stroke across, the reasons on a hover.
+    Out(Out),
 }
 
 /// How a battle's player is shown: by the name the user gave, by the name as the game draws
@@ -152,6 +170,11 @@ pub struct Rio {
     /// plate holds and whether the theme is dark.
     plates: HashMap<(u64, bool), (Arc<gpui::Image>, f32)>,
     content: ScrollHandle,
+    /// The student whose menu is open, where it was asked for, and in which page (a tab,
+    /// or the settings over it): the menu is of that page alone.
+    menu: Option<(i64, Point<Pixels>, (Tab, bool))>,
+    /// Why the student barred or let back in last could not be kept.
+    bar_failed: Option<String>,
     /// Keeps the window's place once it stops moving (see `PLACE_SETTLES`).
     keeping_place: Option<Task<()>>,
     /// Where an update stands while it stays in the page: a newer version, taking it, a
@@ -203,6 +226,8 @@ impl Rio {
             names: Rc::new(names),
             plates: HashMap::new(),
             content: ScrollHandle::new(),
+            menu: None,
+            bar_failed: None,
             keeping_place: None,
             update: None,
             toast: None,
@@ -530,6 +555,10 @@ impl Rio {
         };
         let chosen = self.core.chosen().filter(|choice| choice.of(&opponent));
         let (front, counsel) = (opponent.front, &opponent.counsel);
+        // Whom the user cannot put into an attack: the students Aoi does not list as held,
+        // and those the user barred.
+        let (held, barred) = (opponent.held.as_deref(), self.shown.barred.clone());
+        let (rio, told) = (cx.weak_entity(), self.menu.is_none());
         let behind = chosen.as_ref().map(|choice| choice.rest);
         let hidden = |place, at: usize| Seat {
             place,
@@ -648,16 +677,46 @@ impl Rio {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| this.choose(to.clone(), cx)));
             page = page.child(row);
-            // Under it, the attacks that won against it, the best first.
-            for (nth, tried) in likely.attacks.iter().enumerate() {
+            // Under it, the attacks that won against it, the best first; under those the
+            // user can take, those set aside for a student left out. A student's menu (the
+            // right button) bars the student or lets the student back in.
+            let offered = view::offered(&likely.attacks, held, &barred);
+            for (nth, (tried, aside)) in offered.into_iter().enumerate() {
                 let taken = picked.is_some_and(|choice| choice.attack == Some(tried.attack));
                 let to = Some(choose((!taken).then_some(tried.attack)));
-                let faces = tried.attack.into_iter().enumerate().map(|(slot, student)| {
-                    let key = format!("attack-{rank}-{nth}-{slot}");
-                    face(theme, &names, key, student, SMALL).when(slot == 4, |face| face.ml(SP_2))
-                });
-                let label = format!("攻撃の候補: {}", named(&tried.attack));
-                let row = widgets::candidate(theme, &format!("attack-{rank}-{nth}"), &label, taken)
+                let mut why = Vec::new();
+                let faces: Vec<_> = (tried.attack.into_iter().enumerate())
+                    .map(|(slot, student)| {
+                        let key = format!("attack-{rank}-{nth}-{slot}");
+                        let out = view::out(student, held, &barred);
+                        let (kind, standing) = match (out.any(), aside) {
+                            (true, _) => ("out", Standing::Out(out)),
+                            (false, true) => ("face", Standing::Faint),
+                            (false, false) => ("face", Standing::Plain),
+                        };
+                        if out.any() {
+                            why.push(view::left_out(&named(&[student]), out).replace('\n', " "));
+                        }
+                        let selector = format!("{kind}:{key}");
+                        portrait(theme, &names, key, student, SMALL, standing, told)
+                            .debug_selector(move || selector.clone())
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                Self::asks_menu(rio.clone(), student),
+                            )
+                            .when(slot == 4, |face| face.ml(SP_2))
+                    })
+                    .collect();
+                let id = format!("attack-{rank}-{nth}");
+                let row = if aside {
+                    let label = format!("攻撃の候補（除外）: {}", named(&tried.attack));
+                    widgets::set_aside(theme, &id, &label, &why.join("、"))
+                } else {
+                    let label = format!("攻撃の候補: {}", named(&tried.attack));
+                    widgets::candidate(theme, &id, &label, taken)
+                        .on_click(cx.listener(move |this, _, _, cx| this.choose(to.clone(), cx)))
+                };
+                let row = row
                     .ml(RANK + SP_2)
                     .child(div().flex().flex_none().gap(SP_1).children(faces))
                     .child(
@@ -665,8 +724,7 @@ impl Rio {
                             .flex_none()
                             .font_features(theme::tabular())
                             .child(text(view::fared(tried))),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.choose(to.clone(), cx)));
+                    );
                 page = page.child(row);
             }
             if likely.attacks.is_empty() {
@@ -683,6 +741,142 @@ impl Rio {
     fn choose(&mut self, choice: Option<Choice>, cx: &mut Context<Self>) {
         self.core.choose(choice);
         cx.notify();
+    }
+
+    /// What a press of the right button on a student's icon does: it opens the student's
+    /// menu where the pointer is.
+    fn asks_menu(
+        rio: WeakEntity<Self>,
+        student: i64,
+    ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+        move |event, _, cx| {
+            let at = event.position;
+            let _ = rio.update(cx, |this, cx| {
+                this.menu = Some((student, at, (this.tab, this.settings_open)));
+                cx.notify();
+            });
+        }
+    }
+
+    /// Bars a student from the user's attacks (編成NG) or lets the student back in (see
+    /// `Core::bar`); a failure stays in the page until the next one is kept.
+    fn bar(&mut self, student: i64, barred: bool, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.bar_failed = self.core.bar(student, barred).err();
+        cx.notify();
+    }
+
+    /// The menu of a student, where it was asked for: the student's name, and the one thing
+    /// to do. A press beside it closes it.
+    fn student_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // Another page opened without a press beside the menu (by the keys): the menu goes.
+        self.menu = (self.menu).filter(|(_, _, page)| *page == (self.tab, self.settings_open));
+        let (student, at, _) = self.menu?;
+        let name = name_of(&self.names, student);
+        let barred = self.shown.barred.contains(&student);
+        let label = if barred {
+            "編成NGを外す"
+        } else {
+            "編成NG"
+        };
+        let hover = theme.wash_base;
+        let item = div()
+            .id("student-menu-bar")
+            .debug_selector(move || format!("menu:{label}"))
+            .role(gpui::Role::MenuItem)
+            .aria_label(label)
+            .tab_stop(true)
+            .flex()
+            .items_center()
+            .h(px(30.))
+            .px(SP_3)
+            .text_size(FS_SM)
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .focus(move |s| s.bg(hover))
+            .child(label)
+            .on_click(cx.listener(move |this, _, _, cx| this.bar(student, !barred, cx)));
+        let menu = div()
+            .id("student-menu")
+            .debug_selector(|| "student-menu".to_owned())
+            .role(gpui::Role::Menu)
+            .aria_label(format!("{name}のメニュー"))
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.menu = None;
+                cx.notify();
+            }))
+            .flex()
+            .flex_col()
+            .min_w(px(140.))
+            .py(SP_1)
+            .border_1()
+            .border_color(theme.border)
+            .rounded(RADIUS_SM)
+            .bg(theme.surface)
+            .child(
+                div()
+                    .px(SP_3)
+                    .text_size(FS_CAPTION)
+                    .text_color(theme.muted)
+                    .child(text(name)),
+            )
+            .child(item);
+        let placed = anchored()
+            .position(at)
+            .snap_to_window_with_margin(px(4.))
+            .child(menu);
+        Some(deferred(placed).with_priority(1).into_any_element())
+    }
+
+    /// The students the user keeps out of their attacks (編成NG), by name, each with the
+    /// button that lets the student back in; the student's menu (the right button) does so
+    /// too, as on a candidate. No candidate need show a student for that.
+    fn barred_tab(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let page = scroll("barred", &self.content);
+        if self.shown.barred.is_empty() {
+            let how = "攻撃の候補の生徒を右クリックすると、編成NGにできます。";
+            return page
+                .child(widgets::empty(theme, "barred", how))
+                .into_any_element();
+        }
+        let (rio, told) = (cx.weak_entity(), self.menu.is_none());
+        let rows: Vec<_> = (self.shown.barred.iter())
+            .map(|&student| {
+                let name = name_of(&self.names, student);
+                let key = format!("barred-{student}");
+                let icon = portrait(
+                    theme,
+                    &self.names,
+                    key.clone(),
+                    student,
+                    SMALL,
+                    Standing::Plain,
+                    told,
+                );
+                let back =
+                    widgets::outlined_button(theme, &format!("unbar-{student}"), "外す", false)
+                        .aria_label(format!("{name}の編成NGを外す"))
+                        .on_click(cx.listener(move |this, _, _, cx| this.bar(student, false, cx)));
+                div()
+                    .id(SharedString::from(key))
+                    .debug_selector(move || format!("barred:{student}"))
+                    .role(gpui::Role::ListItem)
+                    .aria_label(name.clone())
+                    .flex()
+                    .items_center()
+                    .gap(SP_3)
+                    .py(SP_1)
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_size(FS_SM)
+                    .child(icon)
+                    .child(div().flex_1().min_w_0().truncate().child(text(name)))
+                    .child(back)
+                    .on_mouse_down(MouseButton::Right, Self::asks_menu(rio.clone(), student))
+            })
+            .collect();
+        page.children(rows).into_any_element()
     }
 
     /// The battles kept, the latest first: who attacked whom with which students, and who
@@ -787,6 +981,12 @@ fn plate_picture(picture: Arc<gpui::Image>, wide: f32, label: &str) -> AnyElemen
         .into_any_element()
 }
 
+/// A student's name, or the student's number where the snapshot does not list one.
+fn name_of(names: &HashMap<i64, String>, student: i64) -> String {
+    let known = names.get(&student).cloned();
+    known.unwrap_or_else(|| format!("生徒#{student}"))
+}
+
 /// A student's icon in a square of `size`, the name on a hover; `key` tells it from the
 /// window's other icons.
 fn face(
@@ -796,21 +996,67 @@ fn face(
     student: i64,
     size: Pixels,
 ) -> gpui::Stateful<gpui::Div> {
-    let name = names
-        .get(&student)
-        .cloned()
-        .unwrap_or_else(|| format!("生徒#{student}"));
+    portrait(theme, names, key, student, size, Standing::Plain, true)
+}
+
+/// A student's icon as it stands in an attack (see `Standing`). One left out says why on a
+/// hover, under the name; the frame and the stroke lie over the picture, as strong as ever.
+/// Where the icon has a menu, nothing is `told` on a hover while the menu is open: a hover
+/// begun just before the press would come up over the menu.
+fn portrait(
+    theme: &Theme,
+    names: &HashMap<i64, String>,
+    key: String,
+    student: i64,
+    size: Pixels,
+    standing: Standing,
+    told: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let name = name_of(names, student);
+    let out = match standing {
+        Standing::Out(out) => Some(out),
+        _ => None,
+    };
+    let picture = icons::student(student, size);
+    let picture = match standing {
+        Standing::Plain => picture,
+        _ => picture.grayscale(true).opacity(FAINT),
+    };
     div()
         .id(SharedString::from(format!("face-{key}")))
         .role(gpui::Role::Image)
         .aria_label(name.clone())
-        .tooltip(widgets::tooltip(name))
+        .when_some(out, |face, out| {
+            face.aria_description(view::reasons(out).join("、"))
+        })
+        .when(told, |face| {
+            face.tooltip(widgets::tooltip(match out {
+                Some(out) => view::left_out(&name, out),
+                None => name,
+            }))
+        })
+        .relative()
         .flex_none()
         .size(size)
         .rounded(RADIUS_SM)
         .overflow_hidden()
         .bg(theme.wash_base)
-        .child(icons::student(student, size))
+        .child(picture)
+        .when(out.is_some(), |face| {
+            let stroke = svg()
+                .path("glyph/slash.svg")
+                .size_full()
+                .text_color(theme.danger);
+            face.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .border_2()
+                    .border_color(theme.danger)
+                    .rounded(RADIUS_SM)
+                    .child(stroke),
+            )
+        })
 }
 
 /// A team as the game lines it up, its icons `size` square: the four strikers, then the two
@@ -1030,12 +1276,16 @@ impl Render for Rio {
             _ => None,
         };
         let update = self.update_notice(&theme, cx);
+        let menu = self.student_menu(&theme, cx);
+        let bar_failed =
+            (self.bar_failed.clone()).map(|message| widgets::error(&theme, "bar-error", message));
         let content = if self.settings_open {
             self.settings_page(&theme, cx)
         } else {
             match self.tab {
                 Tab::Match => self.match_tab(&theme, window, cx),
                 Tab::History => self.history_tab(&theme),
+                Tab::Barred => self.barred_tab(&theme, cx),
             }
         };
         div()
@@ -1045,7 +1295,10 @@ impl Render for Rio {
             .on_action(cx.listener(|_, _: &FocusNext, window, cx| window.focus_next(cx)))
             .on_action(cx.listener(|_, _: &FocusPrev, window, cx| window.focus_prev(cx)))
             .on_action(cx.listener(|this, _: &Escape, _, cx| {
-                this.settings_open = false;
+                // The menu first: it lies over the page.
+                if this.menu.take().is_none() {
+                    this.settings_open = false;
+                }
                 cx.notify();
             }))
             .relative()
@@ -1075,6 +1328,7 @@ impl Render for Rio {
                     .pt(SP_4)
                     .px(SP_3)
                     .children(failure)
+                    .children(bar_failed)
                     .children(update)
                     // The tab's pictures are kept while it shows, and dropped as another opens.
                     .child(
@@ -1089,6 +1343,7 @@ impl Render for Rio {
                         .child(content),
                     ),
             )
+            .children(menu)
             .when_some(self.toast.clone(), |root, toast| {
                 root.child(
                     div()

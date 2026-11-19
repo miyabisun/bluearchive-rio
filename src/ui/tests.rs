@@ -7,14 +7,17 @@ use std::sync::{
 };
 
 use futures::channel::mpsc;
-use gpui::{Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext, px, size};
+use gpui::{
+    Bounds, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, TestAppContext,
+    VisualTestContext, px, size,
+};
 
-use super::{Rio, Updates, theme::Theme};
+use super::{Rio, Tab, Updates, theme::Theme};
 use crate::{
     app::{Core, Places, Snapshot, UpdateCheck},
     opponent::Front,
     settings::{Settings, ThemeChoice},
-    store::{Counsel, Fought, Ground, Kept, Likely, Player, Tried},
+    store::{Counsel, Fought, Ground, Kept, Likely, Player, Store, Tried},
     watch::{Choice, Opponent, Screen, Status},
 };
 
@@ -27,6 +30,8 @@ fn places() -> Places {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = std::fs::remove_dir_all(&dir);
+    // The reading makes the folder as it starts; no reading runs here.
+    std::fs::create_dir_all(&dir).unwrap();
     Places {
         database: dir.join("rio.db"),
         settings: dir.join("settings.json"),
@@ -49,6 +54,12 @@ fn open(cx: &mut TestAppContext) -> (Entity<Rio>, Arc<Core>, &mut VisualTestCont
     vcx.simulate_resize(size(px(720.), px(820.)));
     vcx.run_until_parked();
     (rio, core, vcx)
+}
+
+/// The students barred, as the records keep them.
+fn kept_barred(core: &Core) -> Vec<i64> {
+    let records = Store::open(&core.places.database).unwrap();
+    records.barred().unwrap()
 }
 
 /// Changes the snapshot as the reading would, and lets the window take it.
@@ -76,6 +87,28 @@ fn click(vcx: &mut VisualTestContext, selector: &str) {
         .unwrap_or_else(|| panic!("{selector} is not on the screen"))
         .center();
     vcx.simulate_click(at, Modifiers::none());
+    vcx.run_until_parked();
+}
+
+/// A press of the right button, as on a student's icon for its menu.
+fn right_click(vcx: &mut VisualTestContext, selector: &str) {
+    let position = bounds(vcx, selector)
+        .unwrap_or_else(|| panic!("{selector} is not on the screen"))
+        .center();
+    let (button, modifiers) = (MouseButton::Right, Modifiers::none());
+    vcx.simulate_event(MouseDownEvent {
+        button,
+        position,
+        modifiers,
+        click_count: 1,
+        first_mouse: false,
+    });
+    vcx.simulate_event(MouseUpEvent {
+        button,
+        position,
+        modifiers,
+        click_count: 1,
+    });
     vcx.run_until_parked();
 }
 
@@ -128,8 +161,13 @@ fn opponent() -> Opponent {
         counsel: Counsel {
             likely: vec![own, others],
         },
+        held: None,
     }
 }
+
+/// ミカ and トキ, the third strikers of the two attacks.
+const MIKA: i64 = 10059;
+const TOKI: i64 = 10062;
 
 /// What the user chose of `opponent`: a defense, and an attack against it or none.
 fn choice(rest: [i64; 3], attack: Option<[i64; 6]>) -> Option<Choice> {
@@ -511,4 +549,186 @@ fn the_settings_check_for_an_update_and_take_it(cx: &mut TestAppContext) {
         shows(vcx, "アップデートできませんでした: 通信できませんでした"),
         "a check that fails says why"
     );
+}
+
+#[gpui::test]
+fn a_right_click_bars_a_student_and_sets_the_attacks_with_her_aside(cx: &mut TestAppContext) {
+    let (_, core, vcx) = open(cx);
+    set(&core, vcx, |snapshot| snapshot.opponent = Some(opponent()));
+    assert!(!has(vcx, "excluded:attack-0-1"), "nobody is left out yet");
+    // The menu of ミカ, in the best attack: it names her and bars nobody by itself.
+    right_click(vcx, "face:attack-0-0-2");
+    assert!(has(vcx, "student-menu") && shows(vcx, "ミカ"));
+    assert!(has(vcx, "menu:編成NG") && !has(vcx, "menu:編成NGを外す"));
+    assert_eq!(core.chosen(), None, "the right button chooses nothing");
+    click(vcx, "menu:編成NG");
+    assert!(!has(vcx, "student-menu"), "the menu goes");
+    assert_eq!(kept_barred(&core), [MIKA], "kept with the records");
+    // The attack with her stands under the other, set aside, and she is the one marked.
+    let (usable, aside) = (
+        bounds(vcx, "candidate:attack-0-0").expect("the attack the user can take"),
+        bounds(vcx, "excluded:attack-0-1").expect("the attack set aside"),
+    );
+    assert!(usable.top() < aside.top());
+    assert!(has(vcx, "out:attack-0-1-2"), "ミカ is marked");
+    assert!(
+        has(vcx, "face:attack-0-1-0") && !has(vcx, "out:attack-0-1-0"),
+        "ホシノ beside her is not"
+    );
+    click(vcx, "candidate:attack-0-0");
+    assert_eq!(
+        core.chosen(),
+        choice(BEHIND[0], Some(ATTACKS[1])),
+        "the attack with トキ is the one left to take"
+    );
+    // An attack set aside cannot be chosen.
+    click(vcx, "excluded:attack-0-1");
+    assert_eq!(core.chosen(), choice(BEHIND[0], Some(ATTACKS[1])));
+
+    // Her menu lets her back in: the attacks stand as the records order them again.
+    right_click(vcx, "out:attack-0-1-2");
+    assert!(has(vcx, "menu:編成NGを外す") && !has(vcx, "menu:編成NG"));
+    click(vcx, "menu:編成NGを外す");
+    assert!(kept_barred(&core).is_empty());
+    assert!(!has(vcx, "excluded:attack-0-1") && !has(vcx, "out:attack-0-1-2"));
+    click(vcx, "candidate:attack-0-0");
+    assert_eq!(core.chosen(), choice(BEHIND[0], Some(ATTACKS[0])));
+}
+
+#[gpui::test]
+fn barring_a_student_of_the_attack_chosen_gives_the_attack_up(cx: &mut TestAppContext) {
+    let (_, core, vcx) = open(cx);
+    set(&core, vcx, |snapshot| snapshot.opponent = Some(opponent()));
+    click(vcx, "candidate:attack-0-1");
+    assert_eq!(core.chosen(), choice(BEHIND[0], Some(ATTACKS[1])));
+    // ホシノ stands in both attacks: neither is left to take.
+    right_click(vcx, "face:attack-0-1-0");
+    click(vcx, "menu:編成NG");
+    assert_eq!(
+        core.chosen(),
+        choice(BEHIND[0], None),
+        "no student the user barred is marked over the game: the defense stays chosen"
+    );
+    assert!(has(vcx, "excluded:attack-0-0") && has(vcx, "excluded:attack-0-1"));
+    assert!(has(vcx, "chosen:likely-0"));
+}
+
+#[gpui::test]
+fn barring_another_student_keeps_the_attack_chosen(cx: &mut TestAppContext) {
+    let (_, core, vcx) = open(cx);
+    set(&core, vcx, |snapshot| snapshot.opponent = Some(opponent()));
+    click(vcx, "candidate:attack-0-0");
+    right_click(vcx, "face:attack-0-1-2");
+    click(vcx, "menu:編成NG");
+    assert_eq!(core.chosen(), choice(BEHIND[0], Some(ATTACKS[0])));
+    assert!(has(vcx, "chosen:attack-0-0") && has(vcx, "excluded:attack-0-1"));
+}
+
+#[gpui::test]
+fn an_attack_with_a_student_not_held_is_set_aside(cx: &mut TestAppContext) {
+    let (_, core, vcx) = open(cx);
+    set(&core, vcx, |snapshot| {
+        // Aoi lists every student of the attacks but ミカ.
+        let held = ATTACKS.concat().into_iter().filter(|one| *one != MIKA);
+        snapshot.opponent = Some(Opponent {
+            held: Some(held.collect()),
+            ..opponent()
+        });
+    });
+    assert!(has(vcx, "candidate:attack-0-0") && has(vcx, "excluded:attack-0-1"));
+    assert!(
+        has(vcx, "out:attack-0-1-2"),
+        "ミカ, whom the user does not hold"
+    );
+    assert!(
+        shows(vcx, "2戦1勝") && shows(vcx, "3戦2勝"),
+        "both still told"
+    );
+}
+
+#[gpui::test]
+fn the_menu_closes_without_barring(cx: &mut TestAppContext) {
+    let (rio, core, vcx) = open(cx);
+    // The keys go to the window, as when the app opens it.
+    rio.update_in(vcx, |rio, window, cx| rio.root_focus.focus(window, cx));
+    set(&core, vcx, |snapshot| snapshot.opponent = Some(opponent()));
+    right_click(vcx, "face:attack-0-0-2");
+    assert!(has(vcx, "student-menu"));
+    vcx.simulate_keystrokes("escape");
+    assert!(!has(vcx, "student-menu"), "Escape closes it");
+    right_click(vcx, "face:attack-0-0-2");
+    click(vcx, "tab:対戦");
+    assert!(!has(vcx, "student-menu"), "so does a press beside it");
+    assert!(!has(vcx, "excluded:attack-0-0") && !has(vcx, "excluded:attack-0-1"));
+    assert!(core.snapshot().barred.is_empty(), "nobody was barred");
+    // The icons of a defense have no such menu.
+    right_click(vcx, "supplied:likely-0-1");
+    assert!(!has(vcx, "student-menu"));
+}
+
+#[gpui::test]
+fn the_barred_tab_lists_the_students_barred_to_let_them_back_in(cx: &mut TestAppContext) {
+    let (_, core, vcx) = open(cx);
+    click(vcx, "tab:編成NG");
+    assert!(
+        shows(
+            vcx,
+            "攻撃の候補の生徒を右クリックすると、編成NGにできます。"
+        ),
+        "with nobody barred, how to"
+    );
+    // Barred before this start: the reading reports whom the records keep.
+    let records = Store::open(&core.places.database).unwrap();
+    records.bar(TOKI, true).unwrap();
+    records.bar(MIKA, true).unwrap();
+    set(&core, vcx, |snapshot| {
+        snapshot.barred = records.barred().unwrap();
+        snapshot.opponent = Some(opponent());
+    });
+    // No candidate need show them: the tab always does, by name.
+    assert!(has(vcx, "barred:10062") && shows(vcx, "トキ"));
+    assert!(has(vcx, "barred:10059") && shows(vcx, "ミカ"));
+    // The button of a row lets its student back in.
+    click(vcx, "unbar-10059");
+    assert!(!has(vcx, "barred:10059") && has(vcx, "barred:10062"));
+    assert_eq!(kept_barred(&core), [TOKI]);
+    // So does the student's menu, as on a candidate.
+    right_click(vcx, "barred:10062");
+    click(vcx, "menu:編成NGを外す");
+    assert!(!has(vcx, "barred:10062"));
+    assert!(kept_barred(&core).is_empty());
+    click(vcx, "tab:対戦");
+    assert!(has(vcx, "candidate:attack-0-1") && !has(vcx, "excluded:attack-0-1"));
+}
+
+#[gpui::test]
+fn a_student_who_cannot_be_barred_says_why(cx: &mut TestAppContext) {
+    let (_, core, vcx) = open(cx);
+    set(&core, vcx, |snapshot| snapshot.opponent = Some(opponent()));
+    // The records cannot be written: their folder is gone.
+    std::fs::remove_dir_all(core.places.database.parent().unwrap()).unwrap();
+    right_click(vcx, "face:attack-0-0-2");
+    click(vcx, "menu:編成NG");
+    assert!(has(vcx, "bar-error"), "why, in the page");
+    assert!(!has(vcx, "excluded:attack-0-1"), "and nobody is barred");
+}
+
+#[gpui::test]
+fn the_menu_goes_as_another_page_opens(cx: &mut TestAppContext) {
+    let (rio, core, vcx) = open(cx);
+    set(&core, vcx, |snapshot| snapshot.opponent = Some(opponent()));
+    right_click(vcx, "face:attack-0-0-2");
+    assert!(has(vcx, "student-menu"));
+    // Another tab opened by the keys: no press beside the menu closes it.
+    let turn = |vcx: &mut VisualTestContext, tab| {
+        rio.update(vcx, |rio, cx| {
+            rio.tab = tab;
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    };
+    turn(vcx, Tab::History);
+    assert!(!has(vcx, "student-menu"), "the menu is not of this page");
+    turn(vcx, Tab::Match);
+    assert!(!has(vcx, "student-menu"), "and does not come back");
 }

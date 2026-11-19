@@ -92,7 +92,7 @@ pub enum Ground {
 }
 
 /// A defense that may stand behind an opponent's front: the strikers D2 to D4, what the
-/// records say for it, and the attacks to try against it. Players are counted, never their
+/// records say for it, and the attacks that won against it. Players are counted, never their
 /// battles: fighting one player again and again says no more of the others.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Likely {
@@ -107,7 +107,8 @@ pub struct Likely {
     pub others_before: u32,
     /// Whether the user defended so.
     pub mine: bool,
-    /// The attacks that won against it at least once, the best first, `SHOWN` at most.
+    /// The attacks that won against it at least once, the best first: all of them, for
+    /// the window to offer those the user can take (`view::offered`).
     pub attacks: Vec<Tried>,
 }
 
@@ -117,7 +118,7 @@ pub const OWN: i64 = 30 * DAY;
 pub const TREND: i64 = 14 * DAY;
 const DAY: i64 = 24 * 3600;
 
-/// How many candidates a counsel lists: of the defenses, and of the attacks against each.
+/// How many candidates are listed: of the defenses, and of the attacks against each.
 pub const SHOWN: usize = 5;
 
 /// What the records say against an opponent's front: the defenses that may stand behind
@@ -230,6 +231,9 @@ impl Store {
 
     /// The tables made where they are not there.
     fn prepared(connection: Connection) -> rusqlite::Result<Self> {
+        // The reading keeps the battles while the window keeps whom the user barred: one
+        // waits for the other rather than fail.
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
         let slots: String = SLOTS
             .iter()
             .map(|slot| format!("{slot} INTEGER NOT NULL, "))
@@ -259,7 +263,8 @@ impl Store {
                 earliest INTEGER NOT NULL,
                 latest INTEGER NOT NULL,
                 battle INTEGER UNIQUE REFERENCES battles (id)
-            );"
+            );
+            CREATE TABLE IF NOT EXISTS barred (student INTEGER PRIMARY KEY);"
         ))?;
         // Which side of a battle the user's own is, is kept since 0.1.11: an older database
         // gains the column, empty for the battles it holds.
@@ -565,13 +570,11 @@ impl Store {
 
     /// What the records say against a front at the time `now` (seconds since 1970): the
     /// defenses that may stand behind it (see `likely`), each with the attacks that won
-    /// against it. `opponent` is the opponent's name where the game shows one; of the
-    /// attacks, only teams of the students `held` are taken, where the roster is known.
+    /// against it. `opponent` is the opponent's name where the game shows one.
     pub fn counsel(
         &self,
         front: &Front,
         opponent: Option<&Plate>,
-        held: Option<&[i64]>,
         now: i64,
     ) -> rusqlite::Result<Counsel> {
         let opponent = match opponent {
@@ -607,14 +610,29 @@ impl Store {
         for defense in &mut likely {
             let [second, third, fourth] = defense.rest;
             let [left, right] = specials;
-            let tried = self.attacks([front.first, second, third, fourth, left, right])?;
-            let fit = |tried: &Tried| {
-                tried.wins > 0
-                    && held.is_none_or(|held| tried.attack.iter().all(|one| held.contains(one)))
-            };
-            defense.attacks = tried.into_iter().filter(fit).take(SHOWN).collect();
+            let mut tried = self.attacks([front.first, second, third, fourth, left, right])?;
+            tried.retain(|tried| tried.wins > 0);
+            defense.attacks = tried;
         }
         Ok(Counsel { likely })
+    }
+
+    /// The students the user keeps out of their attacks (編成NG), by id, ascending.
+    pub fn barred(&self) -> rusqlite::Result<Vec<i64>> {
+        let mut barred = self
+            .0
+            .prepare("SELECT student FROM barred ORDER BY student")?;
+        barred.query_map([], |row| row.get(0))?.collect()
+    }
+
+    /// Bars `student` from the user's attacks, or lets the student back in.
+    pub fn bar(&self, student: i64, barred: bool) -> rusqlite::Result<()> {
+        let change = if barred {
+            "INSERT OR IGNORE INTO barred (student) VALUES (?1)"
+        } else {
+            "DELETE FROM barred WHERE student = ?1"
+        };
+        self.0.execute(change, [student]).map(drop)
     }
 
     /// The battles kept, the latest first.
@@ -856,6 +874,27 @@ mod tests {
     }
 
     #[test]
+    fn a_student_is_barred_once_and_let_back_in() {
+        let store = store();
+        assert!(store.barred().unwrap().is_empty(), "nobody at first");
+        for student in [20008, 10062, 20008] {
+            store.bar(student, true).unwrap();
+        }
+        assert_eq!(
+            store.barred().unwrap(),
+            [10062, 20008],
+            "each once, in order"
+        );
+        store.bar(20008, false).unwrap();
+        store.bar(13010, false).unwrap();
+        assert_eq!(
+            store.barred().unwrap(),
+            [10062],
+            "one never barred changes nothing"
+        );
+    }
+
+    #[test]
     fn a_battle_seen_again_is_kept_once() {
         let store = store();
         assert!(store.save(&battle(100)).unwrap(), "new");
@@ -1002,7 +1041,7 @@ mod tests {
     /// What a counsel tells of each defense: its second striker, where it stands, and the
     /// other players of the trend and of before.
     fn told(store: &Store, opponent: Option<&Plate>) -> Vec<(i64, Ground, u32, u32)> {
-        let counsel = store.counsel(&FRONT, opponent, None, NOW).unwrap();
+        let counsel = store.counsel(&FRONT, opponent, NOW).unwrap();
         let told = |likely: &Likely| {
             let others = (likely.others, likely.others_before);
             (likely.rest[0], likely.ground, others.0, others.1)
@@ -1041,7 +1080,7 @@ mod tests {
             ],
             "what is used now comes before what more players used once; the user's own last"
         );
-        let counsel = store.counsel(&FRONT, Some(&plate(5)), None, NOW).unwrap();
+        let counsel = store.counsel(&FRONT, Some(&plate(5)), NOW).unwrap();
         let day = |ago: i64| -> Option<String> {
             let day = "SELECT date(?1, 'unixepoch', 'localtime')";
             store
@@ -1066,13 +1105,7 @@ mod tests {
         }
         // Another front: nothing.
         let unseen = Front { first: 1, ..FRONT };
-        assert!(
-            store
-                .counsel(&unseen, None, None, NOW)
-                .unwrap()
-                .likely
-                .is_empty()
-        );
+        assert!(store.counsel(&unseen, None, NOW).unwrap().likely.is_empty());
     }
 
     #[test]
@@ -1155,23 +1188,23 @@ mod tests {
         never.attacker_won = false;
         store.save(&never).unwrap();
 
-        let attacks = |held: Option<&[i64]>| -> Vec<(i64, u32, u32)> {
-            let counsel = store.counsel(&FRONT, None, held, NOW).unwrap();
+        let attacks = || -> Vec<(i64, u32, u32)> {
+            let counsel = store.counsel(&FRONT, None, NOW).unwrap();
             let tried = counsel.likely[0].attacks.iter();
             tried
                 .map(|tried| (tried.attack[0], tried.wins, tried.battles))
                 .collect()
         };
-        assert_eq!(attacks(None), [(19000, 1, 1), (10000, 1, 2)]);
-        let held: Vec<i64> = (10000..10006).collect();
-        assert_eq!(attacks(Some(&held)), [(10000, 1, 2)], "the team held");
-        // Six more attacks that won: five are told.
+        // Whether the user holds the students is not the records' to say: the window sets
+        // aside what the user cannot take (`view::offered`).
+        assert_eq!(attacks(), [(19000, 1, 1), (10000, 1, 2)]);
+        // Six more attacks that won: all are told, for the window to pick from.
         for student in 17000..17006 {
             let mut more = battle(student as u32);
             more.attacker.team[2].student = student;
             store.save(&more).unwrap();
         }
-        assert_eq!(attacks(None).len(), 5);
+        assert_eq!(attacks().len(), 8);
     }
 
     #[test]

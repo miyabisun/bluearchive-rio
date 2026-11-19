@@ -87,8 +87,15 @@ fn describe(battle: &Kept, names: &HashMap<i64, String>) -> String {
 
 /// What the records say against an opponent's front: the defenses that may stand behind
 /// it, the likeliest first, each with why it is likely and the attacks that won against
-/// it. Which to take is the user's to say.
-fn foretell(front: &Front, counsel: &Counsel, names: &HashMap<i64, String>) -> String {
+/// it: those the user can take, then those set aside for a student not `held` or `barred`,
+/// with why. Which to take is the user's to say.
+fn foretell(
+    front: &Front,
+    counsel: &Counsel,
+    held: Option<&[i64]>,
+    barred: &[i64],
+    names: &HashMap<i64, String>,
+) -> String {
     let name = |student: &i64| {
         names
             .get(student)
@@ -114,23 +121,36 @@ fn foretell(front: &Front, counsel: &Counsel, names: &HashMap<i64, String>) -> S
         if likely.attacks.is_empty() {
             told.push_str("\n     勝った攻撃は、まだ登録がありません");
         }
-        for tried in &likely.attacks {
+        for (tried, aside) in view::offered(&likely.attacks, held, barred) {
             told.push_str(&format!(
-                "\n     {} {}",
+                "\n     {}{} {}",
+                if aside { "除外 " } else { "" },
                 view::fared(tried),
                 team(&tried.attack, 'A', names)
             ));
+            for student in &tried.attack {
+                let reasons = view::reasons(view::out(*student, held, barred));
+                if !reasons.is_empty() {
+                    told.push_str(&format!(
+                        "\n       {}: {}",
+                        name(student),
+                        reasons.join("、")
+                    ));
+                }
+            }
         }
     }
     told
 }
 
 /// The ids of the students held, as Aoi wrote them; `None` (with the reason told) when its
-/// file does not read: the counsel then takes any team, held or not.
+/// file does not read: no attack is then set aside for a student not held.
 fn held() -> Option<Vec<i64>> {
     let held = aoi::held()
         .inspect_err(|error| {
-            eprintln!("Aoi の名簿を読めないので、手持ちにない生徒を含む攻撃も案内します ({error})");
+            eprintln!(
+                "Aoi の名簿を読めないので、手持ちにない生徒を含む攻撃も除外しません ({error})"
+            );
         })
         .ok()?;
     Some(held.iter().filter_map(|student| student.id).collect())
@@ -185,6 +205,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         ["predict", paths @ ..] if !paths.is_empty() => {
             let (reader, store, names) = (Reader::new(), Store::open(&database()?)?, names());
             let held = held();
+            let barred = store.barred()?;
             for path in paths {
                 let screen = image::open(path)?.to_rgb8();
                 match reader.front(&screen) {
@@ -192,8 +213,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                     Some(front) => {
                         let name = opponent::name(&screen);
                         let now = watch::clock();
-                        let counsel = store.counsel(&front, name.as_ref(), held.as_deref(), now)?;
-                        println!("{path}: {}", foretell(&front, &counsel, &names));
+                        let counsel = store.counsel(&front, name.as_ref(), now)?;
+                        let told = foretell(&front, &counsel, held.as_deref(), &barred, &names);
+                        println!("{path}: {told}");
                     }
                 }
             }
@@ -282,23 +304,33 @@ mod tests {
             wins: 2,
             battles: 3,
         };
+        // The best attack needs トキ, whom the user barred, and one not held.
+        let better = Tried {
+            attack: [8, 2, 3, 4, 5, 99],
+            wins: 1,
+            battles: 1,
+        };
+        let held: Vec<i64> = (1..10).collect();
         let counsel = Counsel {
             likely: vec![
-                likely([2, 9, 99], Ground::Theirs, 0, vec![won]),
+                likely([2, 9, 99], Ground::Theirs, 0, vec![better, won]),
                 likely([2, 8, 9], Ground::Trend, 2, Vec::new()),
             ],
         };
         assert_eq!(
-            foretell(&front, &counsel, &names()),
+            foretell(&front, &counsel, Some(&held), &[8], &names()),
             "対戦相手の防衛: D1 アツコ | SP イロハ / SP ミチル（ドレス）
   1. D2 マリナ / D3 イオリ / D4 生徒#99 （本人 11-17）
      3戦2勝 A1 ホシノ / A2 マリナ / A3 ヒビキ（応援団） / A4 ハスミ（水着） | SP イロハ / SP ミチル（ドレス）
+     除外 1戦1勝 A1 トキ / A2 マリナ / A3 ヒビキ（応援団） / A4 ハスミ（水着） | SP イロハ / SP 生徒#99
+       トキ: 編成NG（右クリックで外せます）
+       生徒#99: お迎えしていません（Aoi の生徒一覧にいません）
   2. D2 マリナ / D3 トキ / D4 イオリ （ほか 2人）
      勝った攻撃は、まだ登録がありません"
         );
         let none = Counsel { likely: Vec::new() };
         assert_eq!(
-            foretell(&front, &none, &names()),
+            foretell(&front, &none, None, &[], &names()),
             "対戦相手の防衛: D1 アツコ | SP イロハ / SP ミチル（ドレス）
   同じ D1 とスペシャルの防衛は、まだ登録がありません"
         );

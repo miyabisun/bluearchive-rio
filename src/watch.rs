@@ -52,6 +52,9 @@ pub struct Opponent {
     /// The opponent's name as the game draws it, where its dialog was read.
     pub name: Option<Plate>,
     pub counsel: Counsel,
+    /// The students held, as Aoi wrote them when the opponent came up; `None` where its
+    /// file does not read: nobody is known to be missing then.
+    pub held: Option<Vec<i64>>,
 }
 
 /// The defense the user takes an opponent to have behind its front, and the attack the
@@ -90,6 +93,8 @@ pub enum Update {
     /// The battles kept, the latest first: as the app starts, and after one more is kept.
     Battles(Vec<Kept>),
     Opponent(Opponent),
+    /// The students the user keeps out of their attacks, as the app starts.
+    Barred(Vec<i64>),
 }
 
 /// A record is taken for opened from the list when it shows this shortly after the list:
@@ -389,6 +394,8 @@ fn run(
         Status::NoGame,
         Some(Update::Battles(store.battles().map_err(records)?)),
     );
+    let barred = store.barred().map_err(records)?;
+    report(Status::NoGame, Some(Update::Barred(barred)));
     // Without the window over the game, the counsel still shows in Rio's own.
     let mut overlay = Overlay::new();
     let (mut steady, mut visit) = (Steady::new(Battle::alike), Visit::default());
@@ -396,8 +403,7 @@ fn run(
     // without the name.
     let mut met: Option<(Front, Option<Plate>)> = None;
     let mut counselled: Option<Opponent> = None;
-    // The students held and their ranks, as Aoi wrote them when the opponent came up.
-    let mut roster: Option<Vec<i64>> = None;
+    // The ranks of the students held, as Aoi wrote them when the opponent came up.
     let mut ranks: HashMap<i64, Rank> = HashMap::new();
     // The list of records: how long it is up, and what it told from frame to frame.
     let mut up = Up::default();
@@ -496,9 +502,7 @@ fn run(
                 && let Some(mut opponent) = counselled.take()
             {
                 let (front, name) = (&opponent.front, opponent.name.as_ref());
-                opponent.counsel = store
-                    .counsel(front, name, roster.as_deref(), clock())
-                    .map_err(records)?;
+                opponent.counsel = store.counsel(front, name, clock()).map_err(records)?;
                 report(status.clone(), Some(Update::Opponent(opponent.clone())));
                 counselled = Some(opponent);
             }
@@ -556,17 +560,15 @@ fn run(
             };
             if !counselled.as_ref().is_some_and(same) {
                 let held = aoi::held().ok();
-                roster = held
-                    .as_ref()
-                    .map(|held| held.iter().filter_map(|student| student.id).collect());
                 ranks = held.iter().flatten().filter_map(rank).collect();
                 let counsel = store
-                    .counsel(&front, name.as_ref(), roster.as_deref(), clock())
+                    .counsel(&front, name.as_ref(), clock())
                     .map_err(records)?;
                 let opponent = Opponent {
                     front,
                     name,
                     counsel,
+                    held: held.map(|held| held.iter().filter_map(|one| one.id).collect()),
                 };
                 report(status.clone(), Some(Update::Opponent(opponent.clone())));
                 counselled = Some(opponent);
@@ -820,6 +822,7 @@ mod tests {
             front,
             name: name.map(plate),
             counsel: Counsel { likely: Vec::new() },
+            held: None,
         };
         let choice = Choice {
             front,

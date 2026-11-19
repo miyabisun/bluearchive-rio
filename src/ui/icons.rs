@@ -12,6 +12,8 @@ pub enum Glyph {
     /// The game's window: where the frames read come from.
     Window,
     Menu,
+    /// A stroke across an icon, from its upper left to its lower right: not to be taken.
+    Slash,
 }
 
 impl Glyph {
@@ -19,6 +21,7 @@ impl Glyph {
         match self {
             Self::Window => "window",
             Self::Menu => "menu",
+            Self::Slash => "slash",
         }
     }
 
@@ -30,10 +33,13 @@ impl Glyph {
             Self::Menu => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" stroke="black" stroke-width="2" stroke-linecap="round"/></svg>"#
             }
+            Self::Slash => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2 2L14 14" stroke="black" stroke-width="1.75" stroke-linecap="round"/></svg>"#
+            }
         }
     }
 
-    const ALL: [Self; 2] = [Self::Window, Self::Menu];
+    const ALL: [Self; 3] = [Self::Window, Self::Menu, Self::Slash];
 }
 
 /// `glyph` at `size`, in `color`.

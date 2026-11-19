@@ -3,7 +3,7 @@
 //! window.
 
 use crate::{
-    store::{Fought, Ground, Likely, Tried},
+    store::{Fought, Ground, Likely, SHOWN, Tried},
     watch::{Screen, Status},
 };
 
@@ -120,6 +120,72 @@ pub fn fared(tried: &Tried) -> String {
     format!("{}戦{}勝", tried.battles, tried.wins)
 }
 
+/// Why a student is left out of the attacks the user may take: not among the students Aoi
+/// lists as held, or barred by the user (編成NG). Neither: the student is not left out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Out {
+    pub not_held: bool,
+    pub barred: bool,
+}
+
+impl Out {
+    /// Whether the student is left out at all.
+    pub fn any(self) -> bool {
+        self.not_held || self.barred
+    }
+}
+
+/// Whether `student` is left out, and why. `held` is Aoi's roster where it reads: without
+/// it nobody is known to be missing.
+pub fn out(student: i64, held: Option<&[i64]>, barred: &[i64]) -> Out {
+    Out {
+        not_held: held.is_some_and(|held| !held.contains(&student)),
+        barred: barred.contains(&student),
+    }
+}
+
+/// The attacks as the window offers them, each with whether it is set aside (one of its
+/// students is left out): those the user can take first, then those set aside, each kind in
+/// the order given and `SHOWN` at most.
+pub fn offered<'a>(
+    attacks: &'a [Tried],
+    held: Option<&[i64]>,
+    barred: &[i64],
+) -> Vec<(&'a Tried, bool)> {
+    let aside = |tried: &Tried| {
+        let mut team = tried.attack.iter();
+        team.any(|student| out(*student, held, barred).any())
+    };
+    let of = |kind: bool| {
+        let of_kind = attacks.iter().filter(move |tried| aside(tried) == kind);
+        of_kind.take(SHOWN).map(move |tried| (tried, kind))
+    };
+    of(false).chain(of(true)).collect()
+}
+
+/// What a hover says of a student in an attack: the name, and under it why the student is
+/// left out.
+pub fn left_out(name: &str, out: Out) -> String {
+    let mut said = name.to_owned();
+    for reason in reasons(out) {
+        said.push('\n');
+        said.push_str(reason);
+    }
+    said
+}
+
+/// Why a student is left out, in the window's words, with what the user can do about it.
+pub fn reasons(out: Out) -> Vec<&'static str> {
+    let mut said = Vec::new();
+    if out.not_held {
+        said.push("お迎えしていません（Aoi の生徒一覧にいません）");
+    }
+    if out.barred {
+        said.push("編成NG（右クリックで外せます）");
+    }
+    said
+}
+
 /// When a battle was kept, short: "11-17 13:14" of "2026-11-17 13:14:04".
 pub fn kept_at(seen_at: &str) -> &str {
     seen_at.get(5..16).unwrap_or(seen_at)
@@ -174,7 +240,7 @@ pub fn update_text(update: &UpdateState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tone, basis, fared, fought_at, kept_at, status_view};
+    use super::{Out, Tone, basis, fared, fought_at, kept_at, left_out, offered, out, status_view};
     use crate::{
         store::{Fought, Ground, Likely, Tried},
         watch::{Screen, Status},
@@ -243,6 +309,83 @@ mod tests {
         assert_eq!(basis(&likely), ["ほか 1人（2週間より前）", "自分の防衛"]);
         likely.others_before = 0;
         assert_eq!(basis(&likely), ["自分の防衛"]);
+    }
+
+    #[test]
+    fn a_student_is_left_out_when_not_held_or_barred() {
+        let held = [1, 2, 3];
+        let fine = Out::default();
+        assert_eq!(out(1, Some(&held), &[]), fine, "held and not barred");
+        assert!(!fine.any());
+        let missing = out(9, Some(&held), &[]);
+        assert_eq!((missing.not_held, missing.barred), (true, false));
+        assert!(missing.any());
+        let barred = out(2, Some(&held), &[2]);
+        assert_eq!((barred.not_held, barred.barred), (false, true));
+        let both = out(9, Some(&held), &[9]);
+        assert_eq!((both.not_held, both.barred), (true, true));
+        // Without Aoi's roster nobody is known to be missing: the user's word still counts.
+        assert_eq!(out(9, None, &[]), fine);
+        assert!(out(9, None, &[9]).barred);
+    }
+
+    #[test]
+    fn attacks_with_a_student_left_out_stand_under_the_others() {
+        let tried = |first: i64| Tried {
+            attack: [first, 2, 3, 4, 5, 6],
+            wins: 1,
+            battles: 1,
+        };
+        // The best first, as the records order them: the first and the third need a student
+        // the user does not hold or has barred.
+        let attacks = [tried(90), tried(1), tried(80), tried(7)];
+        let held = [1, 2, 3, 4, 5, 6, 7, 80];
+        let firsts = |offered: Vec<(&Tried, bool)>| -> Vec<(i64, bool)> {
+            let told = offered.into_iter();
+            told.map(|(tried, aside)| (tried.attack[0], aside))
+                .collect()
+        };
+        assert_eq!(
+            firsts(offered(&attacks, Some(&held), &[80])),
+            [(1, false), (7, false), (90, true), (80, true)],
+            "those the user can take first, each kind in the order given"
+        );
+        assert_eq!(
+            firsts(offered(&attacks, None, &[])),
+            [(90, false), (1, false), (80, false), (7, false)],
+            "nobody left out: the order given"
+        );
+        // Five of each kind at most: an attack set aside never takes a usable one's place.
+        let many: Vec<Tried> = (10..17).chain(90..97).map(tried).collect();
+        let held: Vec<i64> = (1..20).collect();
+        let told = firsts(offered(&many, Some(&held), &[]));
+        assert_eq!(
+            told,
+            [10, 11, 12, 13, 14]
+                .map(|first| (first, false))
+                .into_iter()
+                .chain([90, 91, 92, 93, 94].map(|first| (first, true)))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_student_left_out_says_why() {
+        let why = |not_held, barred| left_out("トキ", Out { not_held, barred });
+        assert_eq!(
+            why(false, false),
+            "トキ",
+            "nothing to say of one who is not"
+        );
+        assert_eq!(why(false, true), "トキ\n編成NG（右クリックで外せます）");
+        assert_eq!(
+            why(true, false),
+            "トキ\nお迎えしていません（Aoi の生徒一覧にいません）"
+        );
+        assert_eq!(
+            why(true, true),
+            "トキ\nお迎えしていません（Aoi の生徒一覧にいません）\n編成NG（右クリックで外せます）"
+        );
     }
 
     #[test]

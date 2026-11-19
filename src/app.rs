@@ -13,7 +13,7 @@ use std::{
 use futures::channel::mpsc::UnboundedSender;
 
 use crate::{
-    store::Kept,
+    store::{Kept, Store},
     update,
     watch::{self, Choice, Opponent, Status, Update},
 };
@@ -26,6 +26,8 @@ pub struct Snapshot {
     pub opponent: Option<Opponent>,
     /// The battles kept, the latest first.
     pub battles: Vec<Kept>,
+    /// The students the user keeps out of their attacks (編成NG), by id, ascending.
+    pub barred: Vec<i64>,
 }
 
 impl Snapshot {
@@ -35,6 +37,7 @@ impl Snapshot {
             status: Status::NoGame,
             opponent: None,
             battles: Vec::new(),
+            barred: Vec::new(),
         }
     }
 
@@ -44,6 +47,7 @@ impl Snapshot {
         match update {
             Some(Update::Battles(battles)) => self.battles = battles,
             Some(Update::Opponent(opponent)) => self.opponent = Some(opponent),
+            Some(Update::Barred(barred)) => self.barred = barred,
             None => {}
         }
     }
@@ -140,6 +144,25 @@ impl Core {
         let _ = self.changed.unbounded_send(());
     }
 
+    /// Bars a student from the user's attacks (編成NG) or lets the student back in, kept
+    /// with the records. An attack chosen with a student now barred is given up, its defense
+    /// kept: nobody the user cannot send is marked over the game.
+    pub fn bar(&self, student: i64, barred: bool) -> Result<(), String> {
+        let records = |error: rusqlite::Error| format!("編成NG を保存できません: {error}");
+        let store = Store::open(&self.places.database).map_err(records)?;
+        store.bar(student, barred).map_err(records)?;
+        let now = store.barred().map_err(records)?;
+        if barred
+            && let Some(choice) = self.chosen()
+            && choice.attack.is_some_and(|team| team.contains(&student))
+        {
+            let attack = None;
+            self.choose(Some(Choice { attack, ..choice }));
+        }
+        self.update(|snapshot| snapshot.barred = now);
+        Ok(())
+    }
+
     /// What the user chose last.
     pub fn chosen(&self) -> Option<Choice> {
         self.chosen
@@ -217,6 +240,7 @@ mod tests {
             },
             name: None,
             counsel: Counsel { likely: Vec::new() },
+            held: None,
         };
         let watching = Status::Watching(Some(Screen::Opponent));
         snapshot.apply(watching.clone(), Some(Update::Opponent(opponent.clone())));
