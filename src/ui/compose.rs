@@ -17,8 +17,8 @@ use super::{
 };
 use crate::{
     ARMOR_MARK, ATTACK_MARK, Armor, Attack, Role as Class, Squad, Student,
-    draft::{Refused, TEAM},
-    search, view,
+    draft::{TEAM, takes},
+    search,
 };
 
 /// The sides of a place's icon, at most and at least: the two teams stay beside the button
@@ -35,8 +35,18 @@ const FIELD: Pixels = px(160.);
 /// What is dragged: a student of the list, or the student standing at a place.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Dragged {
-    Student(i64),
+    Student(i64, Squad),
     Place(usize),
+}
+
+impl Dragged {
+    /// The squad of the student dragged: a place of the other squad takes no drop of it.
+    fn squad(self) -> Squad {
+        match self {
+            Self::Student(_, squad) => squad,
+            Self::Place(place) => takes(place),
+        }
+    }
 }
 
 /// What follows the pointer while a student is dragged: the icon.
@@ -173,7 +183,12 @@ impl Rio {
             .child(kind().children(armors));
 
         let query = self.query.read(cx).text().to_owned();
-        let found = search::found(&self.roster, &query, &self.filter);
+        let found = search::found(
+            &self.roster,
+            &query,
+            &self.filter,
+            takes(self.draft.chosen()),
+        );
         let tiles: Vec<_> = (found.into_iter())
             .map(|student| self.tile(student, cx))
             .collect();
@@ -286,13 +301,19 @@ impl Rio {
                     .child(corner(false, false))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
+                let before = this.draft.chosen();
                 this.draft.choose(place);
-                cx.notify();
+                this.chose(before, cx);
             }))
             .when_some(student, |element, student| {
                 element.on_drag(Dragged::Place(place), move |_, _, _, cx| {
                     cx.new(|_| Ghost { student, size })
                 })
+            })
+            // Only a student of the place's squad can be dropped here.
+            .can_drop(move |dragged, _, _| {
+                let dragged = dragged.downcast_ref::<Dragged>();
+                dragged.is_some_and(|dragged| dragged.squad() == takes(place))
             })
             .drag_over::<Dragged>(move |style, _, _, _| style.border_color(over))
             .on_drop(cx.listener(move |this, dragged: &Dragged, _, cx| {
@@ -304,8 +325,8 @@ impl Rio {
     /// type's colour at the upper left and the armor type's at the lower right. A click puts
     /// the student into the place chosen; a drag, into the place it ends on.
     fn tile(&self, student: &Student, cx: &Context<Self>) -> Stateful<gpui::Div> {
-        let id = student.id;
-        let frame = rgb(match student.squad {
+        let (id, squad) = (student.id, student.squad);
+        let frame = rgb(match squad {
             Squad::Main => theme::STRIKER,
             Squad::Support => theme::SPECIAL,
         });
@@ -338,8 +359,8 @@ impl Rio {
             .bg(ground)
             .cursor_pointer()
             .child(icons::student(id, TILE - px(4.)))
-            .on_click(cx.listener(move |this, _, _, cx| this.put(id, cx)))
-            .on_drag(Dragged::Student(id), move |_, _, _, cx| {
+            .on_click(cx.listener(move |this, _, _, cx| this.put(id, squad, cx)))
+            .on_drag(Dragged::Student(id, squad), move |_, _, _, cx| {
                 cx.new(|_| Ghost {
                     student: id,
                     size: TILE,
@@ -347,34 +368,30 @@ impl Rio {
             })
     }
 
-    /// The squad a student fights in.
-    fn squad_of(&self, student: i64) -> Squad {
-        let known = self.roster.iter().find(|one| one.id == student);
-        known.map_or(Squad::Main, |one| one.squad)
-    }
-
     /// Puts a student of the list into the place chosen; the next place is chosen then.
-    fn put(&mut self, student: i64, cx: &mut Context<Self>) {
-        let done = self.draft.put(student, self.squad_of(student));
-        self.placed(done, cx);
+    /// The list offers the place's squad alone, so the place takes whoever is clicked.
+    fn put(&mut self, student: i64, squad: Squad, cx: &mut Context<Self>) {
+        let before = self.draft.chosen();
+        let _ = self.draft.put(student, squad);
+        self.chose(before, cx);
     }
 
     /// Takes what was dropped on a place: a student of the list comes to stand there, a
-    /// place's student changes places with this one's.
+    /// place's student changes places with this one's. A place takes no drop of the other
+    /// squad (`can_drop`), so nothing is refused here.
     fn dropped(&mut self, place: usize, dragged: Dragged, cx: &mut Context<Self>) {
-        let done = match dragged {
-            Dragged::Student(student) => {
-                (self.draft).drop_on(place, student, self.squad_of(student))
-            }
+        let _ = match dragged {
+            Dragged::Student(student, squad) => self.draft.drop_on(place, student, squad),
             Dragged::Place(from) => self.draft.swap(from, place),
         };
-        self.placed(done, cx);
+        cx.notify();
     }
 
-    /// Says why a student did not go into a place.
-    fn placed(&mut self, done: Result<(), Refused>, cx: &mut Context<Self>) {
-        if let Err(refused) = done {
-            self.notify_toast(Some(view::refused(refused)), false, cx);
+    /// After another place was chosen than `before`: where the squad to offer changed, the
+    /// students are another list, shown from its top.
+    fn chose(&mut self, before: usize, cx: &mut Context<Self>) {
+        if takes(before) != takes(self.draft.chosen()) {
+            self.students.set_offset(gpui::point(px(0.), px(0.)));
         }
         cx.notify();
     }

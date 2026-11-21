@@ -784,7 +784,7 @@ fn search(rio: &Entity<Rio>, vcx: &mut VisualTestContext, typed: &str) {
     vcx.run_until_parked();
 }
 
-/// アイリ, the first student by name and a special; アイリ（バンド）, the next, a striker.
+/// アイリ, the first student by name and a special; アイリ（バンド）, the first striker.
 const AIRI: i64 = 23000;
 const AIRI_BAND: i64 = 16015;
 
@@ -811,12 +811,12 @@ fn the_compose_tab_starts_with_the_attacks_first_striker_chosen(cx: &mut TestApp
         bounds(vcx, "students").expect("the list"),
     );
     assert!(last.bottom() < field.top() && field.bottom() <= students.top());
-    let (airi, band) = (
-        bounds(vcx, "tile:23000").expect("アイリ"),
+    let (band, aoba) = (
         bounds(vcx, "tile:16015").expect("アイリ（バンド）"),
+        bounds(vcx, "tile:16017").expect("アオバ"),
     );
-    assert!(airi.left() < band.left() && airi.top() == band.top());
-    assert!(airi.top() >= students.top());
+    assert!(band.left() < aoba.left() && band.top() == aoba.top());
+    assert!(band.top() >= students.top());
     // The place chosen has the corners; a click chooses another.
     assert!(within(vcx, "cursor", "place:0"));
     click(vcx, "place:8");
@@ -826,20 +826,12 @@ fn the_compose_tab_starts_with_the_attacks_first_striker_chosen(cx: &mut TestApp
 #[gpui::test]
 fn a_student_clicked_goes_into_the_place_chosen_and_the_next_is_chosen(cx: &mut TestAppContext) {
     let (rio, _, vcx) = compose(cx);
-    // A special does not go into a striker's place, and the window says why.
-    click(vcx, &format!("tile:{AIRI}"));
-    assert!(shows(
-        vcx,
-        "ストライカーの枠には、ストライカーの生徒を入れます。"
-    ));
-    assert_eq!(draft(&rio, vcx).at(0), None);
-    assert!(within(vcx, "cursor", "place:0"));
-    // A striker does, and the place to the right is chosen.
+    // For a striker's place the strikers alone are offered: nobody who could not go there.
+    assert!(has(vcx, &format!("tile:{AIRI_BAND}")) && !has(vcx, &format!("tile:{AIRI}")));
     click(vcx, &format!("tile:{AIRI_BAND}"));
     assert_eq!(draft(&rio, vcx).at(0), Some(AIRI_BAND));
-    assert!(within(vcx, "cursor", "place:1"));
-    // After the fourth striker the left special, and after the attack's right special the
-    // defense's first striker.
+    assert!(within(vcx, "cursor", "place:1"), "the place to the right");
+    // After the fourth striker the left special is chosen, and the specials are offered.
     click(vcx, "place:3");
     click(vcx, &format!("tile:{AIRI_BAND}"));
     assert!(within(vcx, "cursor", "place:4"));
@@ -848,10 +840,13 @@ fn a_student_clicked_goes_into_the_place_chosen_and_the_next_is_chosen(cx: &mut 
         (None, Some(AIRI_BAND)),
         "she moved: a student stands once in a team"
     );
+    assert!(has(vcx, &format!("tile:{AIRI}")) && !has(vcx, &format!("tile:{AIRI_BAND}")));
+    // After the attack's right special, the defense's first striker: strikers again.
     click(vcx, "place:5");
     click(vcx, &format!("tile:{AIRI}"));
     assert_eq!(draft(&rio, vcx).at(5), Some(AIRI));
     assert!(within(vcx, "cursor", "place:6"));
+    assert!(has(vcx, &format!("tile:{AIRI_BAND}")) && !has(vcx, &format!("tile:{AIRI}")));
 }
 
 #[gpui::test]
@@ -886,7 +881,7 @@ fn the_students_are_narrowed_by_the_name_and_the_buttons(cx: &mut TestAppContext
     }
     assert!(has(vcx, "filter:タンク") && !has(vcx, "pressed:タンク"));
     search(&rio, vcx, "");
-    assert!(has(vcx, &format!("tile:{AIRI}")) && has(vcx, "tile:16017"));
+    assert!(has(vcx, &format!("tile:{AIRI_BAND}")) && has(vcx, "tile:16017"));
 }
 
 #[gpui::test]
@@ -896,21 +891,22 @@ fn students_and_places_are_dragged(cx: &mut TestAppContext) {
     drag(vcx, &format!("tile:{AIRI_BAND}"), "place:2");
     assert_eq!(draft(&rio, vcx).at(2), Some(AIRI_BAND));
     assert!(within(vcx, "cursor", "place:0"));
+    // A place of the other squad takes no drop, and nobody is told off.
+    drag(vcx, &format!("tile:{AIRI_BAND}"), "place:4");
+    assert_eq!(draft(&rio, vcx).at(4), None);
+    // With a special's place chosen the specials are offered, to throw in as well.
+    click(vcx, "place:4");
     drag(vcx, &format!("tile:{AIRI}"), "place:10");
     assert_eq!(draft(&rio, vcx).at(10), Some(AIRI));
-    // Not into a place of the other squad.
     drag(vcx, &format!("tile:{AIRI}"), "place:1");
     assert_eq!(draft(&rio, vcx).at(1), None);
-    assert!(shows(
-        vcx,
-        "ストライカーの枠には、ストライカーの生徒を入れます。"
-    ));
     // Two places change their students, across the teams too.
     drag(vcx, "place:2", "place:7");
     assert_eq!(
         (draft(&rio, vcx).at(2), draft(&rio, vcx).at(7)),
         (None, Some(AIRI_BAND))
     );
+    click(vcx, "place:0");
     drag(vcx, &format!("tile:{}", 16017), "place:2");
     drag(vcx, "place:7", "place:2");
     assert_eq!(
@@ -1013,7 +1009,7 @@ fn the_least_window_shows_the_teams_the_search_and_three_rows_of_students(cx: &m
     // Three rows of students show whole.
     let (students, first) = (
         bounds(vcx, "students").expect("the list"),
-        bounds(vcx, &format!("tile:{AIRI}")).expect("the first student"),
+        bounds(vcx, &format!("tile:{AIRI_BAND}")).expect("the first student"),
     );
     let rows = (students.bottom() - first.top()) / (first.size.height + px(4.));
     assert!((3. ..3.5).contains(&rows), "{rows} rows of students show");

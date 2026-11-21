@@ -1,7 +1,7 @@
 //! Finding students to put into a formation by hand: by the name as it is typed (the IME
 //! gives hiragana, the names are in katakana), and by class, attack type and armor type.
 
-use crate::{Armor, Attack, Role, Student};
+use crate::{Armor, Attack, Role, Squad, Student};
 
 /// Folds a text so a query matches however it is typed: hiragana into katakana, capitals
 /// into small letters, spaces dropped.
@@ -46,15 +46,21 @@ impl Filter {
     }
 }
 
-/// The students whose name (or its reading) holds the query and who fit the filter, by
-/// name: by the reading where the name is not in kana.
-pub fn found<'a>(students: &'a [Student], query: &str, filter: &Filter) -> Vec<&'a Student> {
+/// The students of a squad (the one the place to fill takes: nobody is offered who cannot
+/// go there) whose name (or its reading) holds the query and who fit the filter, by name:
+/// by the reading where the name is not in kana.
+pub fn found<'a>(
+    students: &'a [Student],
+    query: &str,
+    filter: &Filter,
+    squad: Squad,
+) -> Vec<&'a Student> {
     let query = fold(query);
     // What a student is ordered by, and found by beside the name.
     let read = |student: &Student| fold(student.reading.as_deref().unwrap_or(&student.name));
     let mut found: Vec<(String, &Student)> = students
         .iter()
-        .filter(|student| filter.fits(student))
+        .filter(|student| student.squad == squad && filter.fits(student))
         .map(|student| (read(student), student))
         .filter(|(read, student)| read.contains(&query) || fold(&student.name).contains(&query))
         .collect();
@@ -81,7 +87,7 @@ mod tests {
         }
     }
 
-    /// Five students, not in the order of their names.
+    /// Five strikers, not in the order of their names, and a special.
     fn students() -> Vec<Student> {
         use {Armor::*, Attack::*, Role::*};
         let mut miku = student(5, "初音ミク", Supporter, Explosion, LightArmor);
@@ -92,6 +98,10 @@ mod tests {
             student(3, "アル", DamageDealer, Explosion, LightArmor),
             student(4, "トキ", DamageDealer, Pierce, ElasticArmor),
             miku,
+            Student {
+                squad: Squad::Support,
+                ..student(6, "アコ", Supporter, Explosion, LightArmor)
+            },
         ]
     }
 
@@ -113,15 +123,42 @@ mod tests {
         let students = students();
         let none = Filter::default();
         assert_eq!(
-            ids(found(&students, "", &none)),
+            ids(found(&students, "", &none, Squad::Main)),
             [3, 4, 5, 1, 2],
             "all of them by name: アル, トキ, はつねミク by its reading, ホシノ, ホシノ（水着）"
         );
-        assert_eq!(ids(found(&students, "ほし", &none)), [1, 2], "hiragana");
-        assert_eq!(ids(found(&students, "シノ", &none)), [1, 2], "a part");
-        assert_eq!(ids(found(&students, "みく", &none)), [5], "the name's kana");
-        assert_eq!(ids(found(&students, "はつね", &none)), [5], "the reading");
-        assert!(found(&students, "ひな", &none).is_empty());
+        assert_eq!(
+            ids(found(&students, "ほし", &none, Squad::Main)),
+            [1, 2],
+            "hiragana"
+        );
+        assert_eq!(
+            ids(found(&students, "シノ", &none, Squad::Main)),
+            [1, 2],
+            "a part"
+        );
+        assert_eq!(
+            ids(found(&students, "みく", &none, Squad::Main)),
+            [5],
+            "the name's kana"
+        );
+        assert_eq!(
+            ids(found(&students, "はつね", &none, Squad::Main)),
+            [5],
+            "the reading"
+        );
+        assert!(found(&students, "ひな", &none, Squad::Main).is_empty());
+    }
+
+    #[test]
+    fn only_the_squad_asked_for_is_found() {
+        let students = students();
+        let none = Filter::default();
+        // アコ, the special, is not offered for a striker's place, by her name either.
+        assert_eq!(ids(found(&students, "あ", &none, Squad::Main)), [3]);
+        assert_eq!(ids(found(&students, "", &none, Squad::Support)), [6]);
+        assert_eq!(ids(found(&students, "あこ", &none, Squad::Support)), [6]);
+        assert!(found(&students, "ほしの", &none, Squad::Support).is_empty());
     }
 
     #[test]
@@ -129,22 +166,25 @@ mod tests {
         let students = students();
         let mut filter = Filter::default();
         toggle(&mut filter.attacks, Attack::Pierce);
-        assert_eq!(ids(found(&students, "", &filter)), [4, 1]);
+        assert_eq!(ids(found(&students, "", &filter, Squad::Main)), [4, 1]);
         // Another of the same kind: either fits.
         toggle(&mut filter.attacks, Attack::Explosion);
-        assert_eq!(ids(found(&students, "", &filter)), [3, 4, 5, 1, 2]);
+        assert_eq!(
+            ids(found(&students, "", &filter, Squad::Main)),
+            [3, 4, 5, 1, 2]
+        );
         // Another kind: both have to fit.
         toggle(&mut filter.roles, Role::DamageDealer);
-        assert_eq!(ids(found(&students, "", &filter)), [3, 4, 2]);
+        assert_eq!(ids(found(&students, "", &filter, Squad::Main)), [3, 4, 2]);
         toggle(&mut filter.armors, Armor::ElasticArmor);
-        assert_eq!(ids(found(&students, "", &filter)), [4]);
+        assert_eq!(ids(found(&students, "", &filter, Squad::Main)), [4]);
         // With the name as well.
-        assert!(found(&students, "ほしの", &filter).is_empty());
+        assert!(found(&students, "ほしの", &filter, Squad::Main).is_empty());
         // Pressed again, a button is let up.
         toggle(&mut filter.armors, Armor::ElasticArmor);
         toggle(&mut filter.roles, Role::DamageDealer);
         toggle(&mut filter.attacks, Attack::Explosion);
         assert_eq!(filter.attacks, [Attack::Pierce]);
-        assert_eq!(ids(found(&students, "ほしの", &filter)), [1]);
+        assert_eq!(ids(found(&students, "ほしの", &filter, Squad::Main)), [1]);
     }
 }

@@ -3,8 +3,6 @@
 //! window.
 
 use crate::{
-    Squad,
-    draft::Refused,
     store::{Fought, Ground, Likely, SHOWN, Tried},
     watch::{Screen, Status},
 };
@@ -196,14 +194,6 @@ pub fn reasons(out: Out) -> Vec<&'static str> {
         said.push("編成NG（右クリックで外せます）");
     }
     said
-}
-
-/// Why a student did not go into a place of a formation put together by hand.
-pub fn refused(refused: Refused) -> &'static str {
-    match refused.takes {
-        Squad::Main => "ストライカーの枠には、ストライカーの生徒を入れます。",
-        Squad::Support => "スペシャルの枠には、スペシャルの生徒を入れます。",
-    }
 }
 
 /// When a battle was kept, short: "11-17 13:14" of "2026-11-17 13:14:04".
