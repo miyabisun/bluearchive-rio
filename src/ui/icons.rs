@@ -1,5 +1,6 @@
 //! What the window draws from pictures, served to GPUI as assets: the students' icons built
-//! into the program (`student/<id>.webp`) and the line icons drawn in the text colour
+//! into the program (`student/<id>.webp`), the marks SchaleDB shows the classes and the types
+//! with (`mark/<name>.png`, white) and the line icons drawn in the text colour
 //! (`glyph/<name>.svg`).
 
 use std::borrow::Cow;
@@ -58,6 +59,13 @@ pub fn student(id: i64, size: Pixels) -> Img {
         .flex_none()
 }
 
+/// The mark of a class or of the types (see `crate::mark`), `size` square.
+pub fn mark(name: &str, size: Pixels) -> Img {
+    img(SharedString::from(format!("mark/{name}.png")))
+        .size(size)
+        .flex_none()
+}
+
 pub struct Assets;
 
 impl AssetSource for Assets {
@@ -68,6 +76,12 @@ impl AssetSource for Assets {
         {
             let icon = id.parse().ok().and_then(crate::icon);
             return Ok(icon.map(Cow::Borrowed));
+        }
+        if let Some(name) = path
+            .strip_prefix("mark/")
+            .and_then(|name| name.strip_suffix(".png"))
+        {
+            return Ok(crate::mark(name).map(Cow::Borrowed));
         }
         let Some(name) = path
             .strip_prefix("glyph/")

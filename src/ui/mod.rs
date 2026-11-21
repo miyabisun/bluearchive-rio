@@ -2,12 +2,14 @@
 //! on one row over the tab's content. It shows the snapshot `Core` keeps current (`app`);
 //! what it derives for display comes from `view`.
 
+mod compose;
 pub mod icons;
 // The window's tests find what is drawn by its `debug_selector`, which GPUI records in debug
 // builds alone: built with `--release` they would find nothing, so they are not built there.
 #[cfg(test)]
 #[cfg(debug_assertions)]
 mod tests;
+pub mod text_input;
 pub mod theme;
 mod widgets;
 
@@ -31,7 +33,10 @@ use gpui::{
 };
 
 use crate::{
+    Student,
     app::{Core, Places, Snapshot, UpdateCheck, VERSION},
+    draft::Draft,
+    search::Filter,
     settings::{Placement, Settings, ThemeChoice},
     store::{Kept, Player},
     view::{self, Out, UpdateState},
@@ -40,6 +45,7 @@ use crate::{
 
 use self::{
     icons::{Assets, Glyph, glyph},
+    text_input::TextInput,
     theme::{FONT, FS_CAPTION, FS_MD, FS_SM, RADIUS_SM, SP_1, SP_2, SP_3, SP_4, Theme},
     widgets::text,
 };
@@ -47,9 +53,11 @@ use self::{
 actions!(rio, [FocusNext, FocusPrev, Escape]);
 
 /// The window's size as it first opens (Aoi's, to stand beside the game the same way), and
-/// the least it is made: a history row's icons and a short name still fit.
+/// the least its content is made: as wide as a history row's icons and a short name, and the
+/// button beside the teams put together by hand; as tall as all that stands over the students
+/// to put into them, and three rows of the students.
 const WINDOW: (f32, f32) = (720., 820.);
-const WINDOW_LEAST: (f32, f32) = (420., 360.);
+const WINDOW_LEAST: (f32, f32) = (420. + compose::BUTTON_ROOM, 448.);
 /// How long the window's place has to stay put before it is kept: a drag moves it many times
 /// a second.
 const PLACE_SETTLES: Duration = Duration::from_millis(500);
@@ -82,16 +90,19 @@ pub enum Tab {
     History,
     /// The students the user keeps out of their attacks (編成NG).
     Barred,
+    /// An attack told to win and its defense, put together by hand to register (編成追加).
+    Compose,
 }
 
 impl Tab {
-    pub const ALL: [Self; 3] = [Self::Match, Self::History, Self::Barred];
+    pub const ALL: [Self; 4] = [Self::Match, Self::History, Self::Barred, Self::Compose];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Match => "対戦",
             Self::History => "履歴",
             Self::Barred => "編成NG",
+            Self::Compose => "編成追加",
         }
     }
 
@@ -100,6 +111,7 @@ impl Tab {
             Self::Match => "match",
             Self::History => "history",
             Self::Barred => "barred",
+            Self::Compose => "compose",
         }
     }
 }
@@ -122,6 +134,14 @@ enum Standing {
     /// The student an attack is set aside for: grey and faint, in a frame of danger with a
     /// stroke across, the reasons on a hover.
     Out(Out),
+}
+
+/// What a menu was asked for: a student (to bar or to let back in), or an attack the user
+/// registered against a defense (to take away).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asked {
+    Student(i64),
+    Registered([i64; 6], [i64; 6]),
 }
 
 /// How a battle's player is shown: by the name the user gave, by the name as the game draws
@@ -170,11 +190,21 @@ pub struct Rio {
     /// plate holds and whether the theme is dark.
     plates: HashMap<(u64, bool), (Arc<gpui::Image>, f32)>,
     content: ScrollHandle,
-    /// The student whose menu is open, where it was asked for, and in which page (a tab,
-    /// or the settings over it): the menu is of that page alone.
-    menu: Option<(i64, Point<Pixels>, (Tab, bool))>,
-    /// Why the student barred or let back in last could not be kept.
-    bar_failed: Option<String>,
+    /// What the open menu was asked for, where, and in which page (a tab, or the settings
+    /// over it): the menu is of that page alone.
+    menu: Option<(Asked, Point<Pixels>, (Tab, bool))>,
+    /// Why what the user asked last (a student barred, a formation registered) could not
+    /// be kept.
+    not_kept: Option<String>,
+    /// The students of the snapshot, to put into the teams made by hand.
+    roster: Rc<Vec<Student>>,
+    /// The teams as far as they are put together.
+    draft: Draft,
+    /// The name typed and the buttons pressed to find students.
+    query: gpui::Entity<TextInput>,
+    filter: Filter,
+    /// Where the students found are scrolled to.
+    students: ScrollHandle,
     /// Keeps the window's place once it stops moving (see `PLACE_SETTLES`).
     keeping_place: Option<Task<()>>,
     /// Where an update stands while it stays in the page: a newer version, taking it, a
@@ -211,10 +241,13 @@ impl Rio {
             this.place_changed(window, cx);
         })
         .detach();
-        let names = crate::students()
-            .into_iter()
-            .map(|student| (student.id, student.name))
+        let roster = crate::students();
+        let names = (roster.iter())
+            .map(|student| (student.id, student.name.clone()))
             .collect();
+        let query = cx.new(|cx| TextInput::new("名前で検索", "", cx));
+        cx.subscribe(&query, |_, _, _: &text_input::Changed, cx| cx.notify())
+            .detach();
         Self {
             core,
             updates: Updates::default(),
@@ -227,7 +260,12 @@ impl Rio {
             plates: HashMap::new(),
             content: ScrollHandle::new(),
             menu: None,
-            bar_failed: None,
+            not_kept: None,
+            roster: Rc::new(roster),
+            draft: Draft::new(),
+            query,
+            filter: Filter::default(),
+            students: ScrollHandle::new(),
             keeping_place: None,
             update: None,
             toast: None,
@@ -702,7 +740,7 @@ impl Rio {
                             .debug_selector(move || selector.clone())
                             .on_mouse_down(
                                 MouseButton::Right,
-                                Self::asks_menu(rio.clone(), student),
+                                Self::asks_menu(rio.clone(), Asked::Student(student)),
                             )
                             .when(slot == 4, |face| face.ml(SP_2))
                     })
@@ -716,15 +754,30 @@ impl Rio {
                     widgets::candidate(theme, &id, &label, taken)
                         .on_click(cx.listener(move |this, _, _, cx| this.choose(to.clone(), cx)))
                 };
+                // How it fared; one the user registered says so, and its word has the menu
+                // that takes the registration away.
+                let fared = div()
+                    .id(SharedString::from(format!("fared-{id}")))
+                    .flex_none()
+                    .font_features(theme::tabular())
+                    .child(text(view::fared(tried)))
+                    .when(tried.registered, |fared| {
+                        let (selector, asked) = (
+                            format!("registered:{id}"),
+                            Asked::Registered(tried.attack, whole),
+                        );
+                        let how = "自分で登録した編成です。右クリックで登録を消せます。";
+                        fared
+                            .debug_selector(move || selector.clone())
+                            .role(gpui::Role::Group)
+                            .aria_label(view::fared(tried))
+                            .when(told, |fared| fared.tooltip(widgets::tooltip(how)))
+                            .on_mouse_down(MouseButton::Right, Self::asks_menu(rio.clone(), asked))
+                    });
                 let row = row
                     .ml(RANK + SP_2)
                     .child(div().flex().flex_none().gap(SP_1).children(faces))
-                    .child(
-                        div()
-                            .flex_none()
-                            .font_features(theme::tabular())
-                            .child(text(view::fared(tried))),
-                    );
+                    .child(fared);
                 page = page.child(row);
             }
             if likely.attacks.is_empty() {
@@ -743,41 +796,48 @@ impl Rio {
         cx.notify();
     }
 
-    /// What a press of the right button on a student's icon does: it opens the student's
-    /// menu where the pointer is.
+    /// What a press of the right button does on a student's icon or on a registered
+    /// attack's word: it opens the menu of what was asked for, where the pointer is.
     fn asks_menu(
         rio: WeakEntity<Self>,
-        student: i64,
+        asked: Asked,
     ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
         move |event, _, cx| {
             let at = event.position;
             let _ = rio.update(cx, |this, cx| {
-                this.menu = Some((student, at, (this.tab, this.settings_open)));
+                this.menu = Some((asked, at, (this.tab, this.settings_open)));
                 cx.notify();
             });
         }
     }
 
     /// Bars a student from the user's attacks (編成NG) or lets the student back in (see
-    /// `Core::bar`); a failure stays in the page until the next one is kept.
+    /// `Core::bar`); a failure stays in the page until the next thing asked is kept.
     fn bar(&mut self, student: i64, barred: bool, cx: &mut Context<Self>) {
         self.menu = None;
-        self.bar_failed = self.core.bar(student, barred).err();
+        self.not_kept = self.core.bar(student, barred).err();
         cx.notify();
     }
 
-    /// The menu of a student, where it was asked for: the student's name, and the one thing
-    /// to do. A press beside it closes it.
+    /// Takes an attack the user registered against a defense away again.
+    fn unregister(&mut self, attack: [i64; 6], defense: [i64; 6], cx: &mut Context<Self>) {
+        self.menu = None;
+        self.not_kept = self.core.unregister(attack, defense).err();
+        cx.notify();
+    }
+
+    /// The menu open, where it was asked for: what it is of (a student's name), and the
+    /// one thing to do. A press beside it closes it.
     fn student_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Another page opened without a press beside the menu (by the keys): the menu goes.
         self.menu = (self.menu).filter(|(_, _, page)| *page == (self.tab, self.settings_open));
-        let (student, at, _) = self.menu?;
-        let name = name_of(&self.names, student);
-        let barred = self.shown.barred.contains(&student);
-        let label = if barred {
-            "編成NGを外す"
-        } else {
-            "編成NG"
+        let (asked, at, _) = self.menu?;
+        let barred =
+            matches!(asked, Asked::Student(student) if self.shown.barred.contains(&student));
+        let (name, label) = match asked {
+            Asked::Student(student) if barred => (name_of(&self.names, student), "編成NGを外す"),
+            Asked::Student(student) => (name_of(&self.names, student), "編成NG"),
+            Asked::Registered(..) => ("登録した編成".to_owned(), "登録を消す"),
         };
         let hover = theme.wash_base;
         let item = div()
@@ -795,7 +855,10 @@ impl Rio {
             .hover(move |s| s.bg(hover))
             .focus(move |s| s.bg(hover))
             .child(label)
-            .on_click(cx.listener(move |this, _, _, cx| this.bar(student, !barred, cx)));
+            .on_click(cx.listener(move |this, _, _, cx| match asked {
+                Asked::Student(student) => this.bar(student, !barred, cx),
+                Asked::Registered(attack, defense) => this.unregister(attack, defense, cx),
+            }));
         let menu = div()
             .id("student-menu")
             .debug_selector(|| "student-menu".to_owned())
@@ -873,7 +936,10 @@ impl Rio {
                     .child(icon)
                     .child(div().flex_1().min_w_0().truncate().child(text(name)))
                     .child(back)
-                    .on_mouse_down(MouseButton::Right, Self::asks_menu(rio.clone(), student))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        Self::asks_menu(rio.clone(), Asked::Student(student)),
+                    )
             })
             .collect();
         page.children(rows).into_any_element()
@@ -1277,8 +1343,8 @@ impl Render for Rio {
         };
         let update = self.update_notice(&theme, cx);
         let menu = self.student_menu(&theme, cx);
-        let bar_failed =
-            (self.bar_failed.clone()).map(|message| widgets::error(&theme, "bar-error", message));
+        let not_kept =
+            (self.not_kept.clone()).map(|message| widgets::error(&theme, "keep-error", message));
         let content = if self.settings_open {
             self.settings_page(&theme, cx)
         } else {
@@ -1286,6 +1352,7 @@ impl Render for Rio {
                 Tab::Match => self.match_tab(&theme, window, cx),
                 Tab::History => self.history_tab(&theme),
                 Tab::Barred => self.barred_tab(&theme, cx),
+                Tab::Compose => self.compose_tab(&theme, window, cx),
             }
         };
         div()
@@ -1328,7 +1395,7 @@ impl Render for Rio {
                     .pt(SP_4)
                     .px(SP_3)
                     .children(failure)
-                    .children(bar_failed)
+                    .children(not_kept)
                     .children(update)
                     // The tab's pictures are kept while it shows, and dropped as another opens.
                     .child(
@@ -1378,6 +1445,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-tab", FocusPrev, None),
         KeyBinding::new("escape", Escape, None),
     ]);
+    text_input::bind_keys(cx);
 }
 
 /// Where the window opens, when it was `left` on one of `displays` (each by its id in the

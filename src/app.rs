@@ -115,6 +115,11 @@ pub fn restart() -> ! {
     std::process::exit(0);
 }
 
+/// Why a formation the user registered could not be kept or taken away.
+fn not_kept(error: rusqlite::Error) -> String {
+    format!("登録した編成を保存できません: {error}")
+}
+
 /// What the window works with: the snapshot the reading keeps current, and what the user
 /// chose in the window for the reading to mark over the game. Every change is signalled,
 /// so the window takes the new snapshot.
@@ -160,6 +165,33 @@ impl Core {
             self.choose(Some(Choice { attack, ..choice }));
         }
         self.update(|snapshot| snapshot.barred = now);
+        Ok(())
+    }
+
+    /// Registers an attack as told to win against a defense, kept with the records;
+    /// whether it is new. What is counselled against the opponent shown follows.
+    pub fn register(&self, attack: [i64; 6], defense: [i64; 6]) -> Result<bool, String> {
+        let store = Store::open(&self.places.database).map_err(not_kept)?;
+        let new = store.register(attack, defense).map_err(not_kept)?;
+        self.counsel_anew(&store)?;
+        Ok(new)
+    }
+
+    /// Takes a registered attack against a defense away again.
+    pub fn unregister(&self, attack: [i64; 6], defense: [i64; 6]) -> Result<(), String> {
+        let store = Store::open(&self.places.database).map_err(not_kept)?;
+        store.unregister(attack, defense).map_err(not_kept)?;
+        self.counsel_anew(&store)
+    }
+
+    /// Asks the records anew what they counsel against the opponent shown.
+    fn counsel_anew(&self, store: &Store) -> Result<(), String> {
+        let Some(mut opponent) = self.snapshot().opponent else {
+            return Ok(());
+        };
+        let (front, name) = (opponent.front, opponent.name.as_ref());
+        opponent.counsel = (store.counsel(&front, name, watch::clock())).map_err(not_kept)?;
+        self.update(|snapshot| snapshot.opponent = Some(opponent));
         Ok(())
     }
 

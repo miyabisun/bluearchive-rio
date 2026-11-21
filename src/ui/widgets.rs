@@ -8,7 +8,10 @@ use gpui::{
     div, prelude::FluentBuilder as _, px,
 };
 
-use super::theme::{FS_SM, RADIUS_SM, SP_1, SP_2, SP_3, Theme};
+use super::{
+    icons,
+    theme::{FS_SM, RADIUS_SM, SP_1, SP_2, SP_3, Theme},
+};
 
 /// A piece of text that the window's tests can find (`text:<the text>`).
 pub fn text(text: impl Into<SharedString>) -> Div {
@@ -142,6 +145,62 @@ fn row(id: &str, kind: &str) -> Stateful<Div> {
         .py(SP_1)
         .rounded(RADIUS_SM)
         .text_size(FS_SM)
+}
+
+/// The sides of a `mark_button`'s face, and how far the face stands over its edge.
+pub const MARK: gpui::Pixels = px(28.);
+const RAISED: gpui::Pixels = px(3.);
+
+/// A button that stays pressed, told by a white mark on its colour (a class, a type): up, its
+/// face stands over an edge of a darker shade; pressed, the face is sunk onto the edge's
+/// place, darker, in a ring of the text colour. The name is on a hover. The tests find it as
+/// `filter:<label>`, pressed as `pressed:<label>`.
+pub fn mark_button(
+    theme: &Theme,
+    label: &str,
+    mark: &str,
+    colour: gpui::Hsla,
+    pressed: bool,
+) -> Stateful<Div> {
+    let shade = |by: f32| gpui::Hsla {
+        l: colour.l * by,
+        ..colour
+    };
+    let selector = format!("{}:{label}", if pressed { "pressed" } else { "filter" });
+    let face = div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(MARK)
+        .rounded(RADIUS_SM)
+        .child(icons::mark(mark, px(18.)));
+    let face = if pressed {
+        face.mt(RAISED)
+            .bg(shade(0.6))
+            .border_2()
+            .border_color(theme.on_surface)
+    } else {
+        face.bg(colour)
+    };
+    div()
+        .id(SharedString::from(format!("filter-{label}")))
+        .debug_selector(move || selector.clone())
+        .role(Role::Button)
+        .aria_label(label.to_owned())
+        .aria_toggled(if pressed {
+            gpui::Toggled::True
+        } else {
+            gpui::Toggled::False
+        })
+        .tab_stop(true)
+        .tooltip(tooltip(label.to_owned()))
+        .flex_none()
+        .w(MARK)
+        .h(MARK + RAISED)
+        .rounded(RADIUS_SM)
+        .cursor_pointer()
+        .when(!pressed, |button| button.bg(shade(0.5)))
+        .child(face)
 }
 
 /// A failure in the page: danger on danger-subtle.

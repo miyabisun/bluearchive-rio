@@ -591,6 +591,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "unicode-segmentation",
  "ureq",
  "windows-capture",
  "windows-sys 0.61.2",

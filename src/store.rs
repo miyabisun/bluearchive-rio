@@ -69,12 +69,15 @@ pub struct Player {
     pub plate: Vec<u8>,
 }
 
-/// An attack kept against one defense: the team, the battles it won and all its battles.
+/// An attack against one defense: the team, the battles kept that it won and all its
+/// battles kept, and whether the user registered it by hand as told to win (it may have no
+/// battle then).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tried {
     pub attack: [i64; 6],
     pub wins: u32,
     pub battles: u32,
+    pub registered: bool,
 }
 
 /// Where a defense stands among those that may be behind a front, the likeliest first:
@@ -83,6 +86,9 @@ pub struct Tried {
 pub enum Ground {
     /// The opponent defended so within `OWN`.
     Theirs,
+    /// The user registered the defense by hand, with an attack told to win against it: a
+    /// defense going round.
+    Registered,
     /// Other players did within `TREND`: the trend.
     Trend,
     /// Only battles before those times tell it.
@@ -107,6 +113,8 @@ pub struct Likely {
     pub others_before: u32,
     /// Whether the user defended so.
     pub mine: bool,
+    /// Whether the user registered the defense by hand.
+    pub registered: bool,
     /// The attacks that won against it at least once, the best first: all of them, for
     /// the window to offer those the user can take (`view::offered`).
     pub attacks: Vec<Tried>,
@@ -129,6 +137,17 @@ pub struct Counsel {
     pub likely: Vec<Likely>,
 }
 
+/// An attack and a defense as the tables keep them: the twelve students in `SLOTS`' order,
+/// each team's specials the smaller id first (which stands left tells nothing).
+fn both(mut attack: [i64; 6], mut defense: [i64; 6]) -> [i64; 12] {
+    attack[4..].sort_unstable();
+    defense[4..].sort_unstable();
+    let mut both = [0; 12];
+    both[..6].copy_from_slice(&attack);
+    both[6..].copy_from_slice(&defense);
+    both
+}
+
 /// A battle behind a front, for telling the defenses likely there: who defended, with whom
 /// behind the first striker, and when (seconds since 1970, and the day in local time).
 struct Defended {
@@ -142,7 +161,13 @@ struct Defended {
 /// the `opponent` used within `OWN`, the one used last first; then the trend, by how many
 /// other players used a defense within `TREND`, then the one used last; then those only
 /// older battles tell, and those only the user's (`me`) do, the one used last first.
-fn likely(defended: &[Defended], opponent: Option<i64>, me: Option<i64>, now: i64) -> Vec<Likely> {
+fn likely(
+    defended: &[Defended],
+    registered: &[[i64; 3]],
+    opponent: Option<i64>,
+    me: Option<i64>,
+    now: i64,
+) -> Vec<Likely> {
     /// What is found of one defense: when the opponent, any other player and the user last
     /// used it, and the other players who did within `TREND` and ever (`None`: those the
     /// game hides the names of).
@@ -153,22 +178,31 @@ fn likely(defended: &[Defended], opponent: Option<i64>, me: Option<i64>, now: i6
         mine: Option<i64>,
         lately: Vec<Option<i64>>,
         ever: Vec<Option<i64>>,
+        registered: bool,
     }
-    let mut found: Vec<Found> = Vec::new();
-    for battle in defended {
-        let known = found.iter().position(|found| found.rest == battle.rest);
+    /// Where a defense is found, made if it is new.
+    fn of(found: &mut Vec<Found>, rest: [i64; 3]) -> &mut Found {
+        let known = found.iter().position(|found| found.rest == rest);
         let known = known.unwrap_or_else(|| {
             found.push(Found {
-                rest: battle.rest,
+                rest,
                 theirs: None,
                 other: None,
                 mine: None,
                 lately: Vec::new(),
                 ever: Vec::new(),
+                registered: false,
             });
             found.len() - 1
         });
-        let found = &mut found[known];
+        &mut found[known]
+    }
+    let mut found: Vec<Found> = Vec::new();
+    for rest in registered {
+        of(&mut found, *rest).registered = true;
+    }
+    for battle in defended {
+        let found = of(&mut found, battle.rest);
         let later = |last: Option<i64>| last.is_none_or(|last| last < battle.at);
         match battle.defender {
             Some(defender) if Some(defender) == opponent => {
@@ -198,6 +232,8 @@ fn likely(defended: &[Defended], opponent: Option<i64>, me: Option<i64>, now: i6
             // Where it stands, and what orders it among those standing there.
             let (ground, order) = if theirs.is_some_and(|at| now - at <= OWN) {
                 (Ground::Theirs, (0, theirs))
+            } else if found.registered {
+                (Ground::Registered, (others, found.other))
             } else if others > 0 {
                 (Ground::Trend, (others, found.other))
             } else if theirs.is_some() || found.other.is_some() {
@@ -212,6 +248,7 @@ fn likely(defended: &[Defended], opponent: Option<i64>, me: Option<i64>, now: i6
                 others,
                 others_before: found.ever.len() as u32 - others,
                 mine: found.mine.is_some(),
+                registered: found.registered,
                 attacks: Vec::new(),
             };
             (likely, order)
@@ -264,7 +301,14 @@ impl Store {
                 latest INTEGER NOT NULL,
                 battle INTEGER UNIQUE REFERENCES battles (id)
             );
-            CREATE TABLE IF NOT EXISTS barred (student INTEGER PRIMARY KEY);"
+            CREATE TABLE IF NOT EXISTS barred (student INTEGER PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS registered (
+                id INTEGER PRIMARY KEY,
+                added_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                {slots}
+                UNIQUE ({every})
+            );",
+            every = SLOTS.join(", ")
         ))?;
         // Which side of a battle the user's own is, is kept since 0.1.11: an older database
         // gains the column, empty for the battles it holds.
@@ -543,17 +587,33 @@ impl Store {
         most.optional()
     }
 
-    /// The attacks kept against a defense (D1 to D4, then the specials), the one that won
-    /// the largest share of its battles first.
+    /// The attacks against a defense (D1 to D4, then the specials): those the user
+    /// registered first, then the others kept, each the one that won the largest share of
+    /// its battles first; a registered one without a battle after those with, the one
+    /// registered last first.
     pub fn attacks(&self, mut defense: [i64; 6]) -> rusqlite::Result<Vec<Tried>> {
         defense[4..].sort_unstable();
+        let mut told = self.0.prepare(
+            "SELECT a1, a2, a3, a4, asp1, asp2 FROM registered
+             WHERE d1 = ?1 AND d2 = ?2 AND d3 = ?3 AND d4 = ?4 AND dsp1 = ?5 AND dsp2 = ?6
+             ORDER BY id DESC",
+        )?;
+        let told: Vec<[i64; 6]> = told
+            .query_map(defense, |row| {
+                let mut attack = [0; 6];
+                for (slot, student) in attack.iter_mut().enumerate() {
+                    *student = row.get(slot)?;
+                }
+                Ok(attack)
+            })?
+            .collect::<rusqlite::Result<_>>()?;
         let mut attacks = self.0.prepare(
             "SELECT a1, a2, a3, a4, asp1, asp2, SUM(attacker_won), COUNT(*) FROM battles
              WHERE d1 = ?1 AND d2 = ?2 AND d3 = ?3 AND d4 = ?4 AND dsp1 = ?5 AND dsp2 = ?6
              GROUP BY a1, a2, a3, a4, asp1, asp2
              ORDER BY 1.0 * SUM(attacker_won) / COUNT(*) DESC, COUNT(*) DESC, MAX(id) DESC",
         )?;
-        attacks
+        let mut attacks = attacks
             .query_map(defense, |row| {
                 let mut attack = [0; 6];
                 for (slot, student) in attack.iter_mut().enumerate() {
@@ -563,9 +623,23 @@ impl Store {
                     attack,
                     wins: row.get(6)?,
                     battles: row.get(7)?,
+                    registered: told.contains(&attack),
                 })
             })?
-            .collect()
+            .collect::<rusqlite::Result<Vec<Tried>>>()?;
+        let fresh = |attack: &[i64; 6]| attacks.iter().all(|tried| tried.attack != *attack);
+        let fresh: Vec<Tried> = (told.iter().filter(|attack| fresh(attack)))
+            .map(|attack| Tried {
+                attack: *attack,
+                wins: 0,
+                battles: 0,
+                registered: true,
+            })
+            .collect();
+        attacks.extend(fresh);
+        // Stable: within the registered and within the others the order stays.
+        attacks.sort_by_key(|tried| !tried.registered);
+        Ok(attacks)
     }
 
     /// What the records say against a front at the time `now` (seconds since 1970): the
@@ -605,16 +679,50 @@ impl Store {
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
-        let mut likely = likely(&defended, opponent, self.me()?, now);
+        // The defenses the user registered behind the same front.
+        let mut registered = self.0.prepare(
+            "SELECT DISTINCT d2, d3, d4 FROM registered
+             WHERE d1 = ?1 AND dsp1 = ?2 AND dsp2 = ?3 ORDER BY id",
+        )?;
+        let registered: Vec<[i64; 3]> = registered
+            .query_map([front.first, specials[0], specials[1]], |row| {
+                Ok([row.get(0)?, row.get(1)?, row.get(2)?])
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut likely = likely(&defended, &registered, opponent, self.me()?, now);
         likely.truncate(SHOWN);
         for defense in &mut likely {
             let [second, third, fourth] = defense.rest;
             let [left, right] = specials;
             let mut tried = self.attacks([front.first, second, third, fourth, left, right])?;
-            tried.retain(|tried| tried.wins > 0);
+            tried.retain(|tried| tried.wins > 0 || tried.registered);
             defense.attacks = tried;
         }
         Ok(Counsel { likely })
+    }
+
+    /// Registers an attack told to win against a defense (each A1 to A4 or D1 to D4, then
+    /// the specials, in either order); whether it is new.
+    pub fn register(&self, attack: [i64; 6], defense: [i64; 6]) -> rusqlite::Result<bool> {
+        let new = self.0.execute(
+            &format!(
+                "INSERT OR IGNORE INTO registered ({}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                SLOTS.join(", ")
+            ),
+            rusqlite::params_from_iter(both(attack, defense)),
+        )?;
+        Ok(new > 0)
+    }
+
+    /// Takes a registered attack against a defense away again.
+    pub fn unregister(&self, attack: [i64; 6], defense: [i64; 6]) -> rusqlite::Result<()> {
+        let is: Vec<String> = (SLOTS.iter().enumerate())
+            .map(|(at, slot)| format!("{slot} = ?{}", at + 1))
+            .collect();
+        let gone = format!("DELETE FROM registered WHERE {}", is.join(" AND "));
+        self.0
+            .execute(&gone, rusqlite::params_from_iter(both(attack, defense)))
+            .map(drop)
     }
 
     /// The students the user keeps out of their attacks (編成NG), by id, ascending.
@@ -824,7 +932,7 @@ mod tests {
 
     use image::{GrayImage, Luma};
 
-    use super::{Ground, Likely, Player, Store};
+    use super::{Ground, Likely, Player, Store, Tried};
     use crate::{
         history::{Battle, Fighter, Party, Plate},
         list::{Ago, Row, Unit},
@@ -1167,6 +1275,104 @@ mod tests {
             .execute(row, (then - 3600, then + 3600, id))
             .unwrap();
         assert_eq!(told(&store, None), [(31, Ground::Before, 0, 1)]);
+    }
+
+    #[test]
+    fn an_attack_told_to_win_is_registered_once_with_its_defense() {
+        let store = store();
+        let (attack, defense) = (
+            [1, 2, 3, 4, 6, 5],
+            [20000, 20001, 20002, 20003, 20005, 20004],
+        );
+        assert!(store.register(attack, defense).unwrap(), "new");
+        // Which special stands left tells nothing: the same teams again.
+        let again = (
+            [1, 2, 3, 4, 5, 6],
+            [20000, 20001, 20002, 20003, 20004, 20005],
+        );
+        assert!(!store.register(again.0, again.1).unwrap());
+        // No battle tells of this defense: it is likely because it was registered, and the
+        // attack against it has no battle either.
+        let counsel = store.counsel(&FRONT, None, NOW).unwrap();
+        assert_eq!(counsel.likely.len(), 1);
+        let likely = &counsel.likely[0];
+        assert_eq!(
+            (likely.rest, likely.ground, likely.registered),
+            ([20001, 20002, 20003], Ground::Registered, true)
+        );
+        let told = Tried {
+            attack: again.0,
+            wins: 0,
+            battles: 0,
+            registered: true,
+        };
+        assert_eq!(likely.attacks, [told]);
+        // Another front does not see it.
+        let other = Front {
+            first: 20001,
+            ..FRONT
+        };
+        assert!(store.counsel(&other, None, NOW).unwrap().likely.is_empty());
+        // Taken away, by either order of the specials.
+        store.unregister(again.0, again.1).unwrap();
+        assert!(store.counsel(&FRONT, None, NOW).unwrap().likely.is_empty());
+    }
+
+    #[test]
+    fn what_was_registered_stands_before_what_the_battles_alone_tell() {
+        let store = store();
+        // The trend: two other players' defense (the second striker 31), won against.
+        days_ago(&store, 1, &against(100, 3, 31));
+        days_ago(&store, 1, &against(200, 4, 31));
+        // The opponent's own (32), and another trend (34) of one other player.
+        days_ago(&store, 2, &against(300, 5, 32));
+        days_ago(&store, 1, &against(350, 3, 34));
+        // Against the first trend: an attack that won once, and one that lost its battle.
+        let with = |damage: u32, first: i64, won: bool| {
+            let mut battle = against(damage, 3, 31);
+            battle.attacker.team[0].student = first;
+            battle.attacker_won = won;
+            days_ago(&store, 1, &battle);
+        };
+        with(400, 15000, true);
+        with(500, 16000, false);
+        // Registered: a defense no battle tells (33); against the first trend's defense an
+        // attack with no battle, the attack that won twice, and the one that lost.
+        let defense = |second: i64| [20000, second, 20002, 20003, 20004, 20005];
+        let attack = |first: i64| [first, 10001, 10002, 10003, 10004, 10005];
+        store.register([1, 2, 3, 4, 5, 6], defense(33)).unwrap();
+        store.register([7, 8, 9, 10, 11, 12], defense(31)).unwrap();
+        store.register(attack(10000), defense(31)).unwrap();
+        store.register(attack(16000), defense(31)).unwrap();
+
+        let counsel = store.counsel(&FRONT, Some(&plate(5)), NOW).unwrap();
+        let told: Vec<_> = (counsel.likely.iter())
+            .map(|likely| (likely.rest[0], likely.ground, likely.registered))
+            .collect();
+        assert_eq!(
+            told,
+            [
+                (32, Ground::Theirs, false),
+                (31, Ground::Registered, true),
+                (33, Ground::Registered, true),
+                (34, Ground::Trend, false),
+            ],
+            "the opponent's own first; of the registered, the one more players use"
+        );
+        // The registered attacks first (those with battles by what they won, then those
+        // without, a lost one too); then the others that won.
+        let attacks: Vec<_> = (counsel.likely[1].attacks.iter())
+            .map(|tried| (tried.attack[0], tried.wins, tried.battles, tried.registered))
+            .collect();
+        assert_eq!(
+            attacks,
+            [
+                (10000, 2, 2, true),
+                (16000, 0, 1, true),
+                (7, 0, 0, true),
+                (15000, 1, 1, false),
+            ]
+        );
     }
 
     #[test]

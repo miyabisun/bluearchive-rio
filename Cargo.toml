@@ -21,6 +21,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serde_yaml = "0.9"
 ureq = "2"
+# The search field's cursor moves by what a reader takes for one letter.
+unicode-segmentation = "1"
 sha2 = "0.10"
 
 [target."cfg(windows)".dependencies]

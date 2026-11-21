@@ -1,7 +1,9 @@
 # Refreshes the SchaleDB snapshot Rio reads the students with: the students released in
 # Japan, sorted by Id, each with the squad it fights in (Main: striker, Support: special),
-# and their icons, the faces the game draws under a battle record's bars. The tests and the
-# app read only this snapshot, never the network.
+# its class (role), attack type and armor type, and, where the name is not written in kana,
+# how it is read; their icons, the faces the game draws under a battle record's bars; and
+# the icons SchaleDB shows the classes and the types with. The tests and the app read only
+# this snapshot, never the network.
 #   powershell -File tools/schaledb/update.ps1
 $ErrorActionPreference = 'Stop'
 $root = Join-Path $PSScriptRoot '..\..\data\schaledb'
@@ -20,11 +22,21 @@ $students = $parser.DeserializeObject([Text.Encoding]::UTF8.GetString($bytes)).V
 
 # One entry per line keeps the snapshot diffable when SchaleDB adds students.
 $lines = foreach ($student in $students) {
-  [ordered]@{
+  $entry = [ordered]@{
     id = [int64]$student.Id
     name = ($student.Name -replace '[\r\n]+', '')
     squad = $student.SquadType
-  } | ConvertTo-Json -Compress
+    role = $student.TacticRole
+    attack = $student.BulletType
+    armor = $student.ArmorType
+  }
+  # A name with letters other than kana (the variant in brackets aside) cannot be found by
+  # typing kana: SchaleDB's readings of the family and the personal name stand in for it.
+  if (($entry.name -replace ([char]0xFF08 + '.*?' + [char]0xFF09), '') -match ('[^' + [char]0x3040 + '-' + [char]0x30FF + ']')) {
+    $personal = if ($student.PersonalNameRuby) { $student.PersonalNameRuby } else { $student.PersonalName }
+    $entry.reading = ($student.FamilyNameRuby + $personal) -replace '\s', ''
+  }
+  $entry | ConvertTo-Json -Compress
 }
 $text = "[`n" + ($lines -join ",`n") + "`n]`n"
 [IO.File]::WriteAllText((Join-Path $root 'students.json'), $text, (New-Object Text.UTF8Encoding($false)))
@@ -40,6 +52,24 @@ foreach ($student in $students) {
   if ($head -ne 'RIFF') {
     Remove-Item $path
     throw "the icon of $($student.Id) is no picture"
+  }
+  $fetched++
+}
+
+# The icons of the classes, and the one icon each of the attack and the armor types (SchaleDB
+# tells a type by the colour under it).
+$ui = Join-Path $root 'ui'
+New-Item -ItemType Directory -Force $ui | Out-Null
+$marks = 'Role_Tanker', 'Role_DamageDealer', 'Role_Healer', 'Role_Supporter', 'Role_Vehicle', 'Type_Attack', 'Type_Defense'
+foreach ($mark in $marks) {
+  $path = Join-Path $ui "$mark.png"
+  if (Test-Path $path) { continue }
+  curl.exe -sSf -o $path "https://schaledb.com/images/ui/$mark.png"
+  if ($LASTEXITCODE -ne 0) { throw "failed to fetch the icon $mark" }
+  $head = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($path), 1, 3)
+  if ($head -ne 'PNG') {
+    Remove-Item $path
+    throw "the icon $mark is no picture"
   }
   $fetched++
 }

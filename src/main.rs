@@ -297,18 +297,21 @@ mod tests {
             others,
             others_before: 0,
             mine: false,
+            registered: false,
             attacks,
         };
         let won = Tried {
             attack: [1, 2, 3, 4, 5, 6],
             wins: 2,
             battles: 3,
+            registered: false,
         };
         // The best attack needs トキ, whom the user barred, and one not held.
         let better = Tried {
             attack: [8, 2, 3, 4, 5, 99],
             wins: 1,
             battles: 1,
+            registered: false,
         };
         let held: Vec<i64> = (1..10).collect();
         let counsel = Counsel {

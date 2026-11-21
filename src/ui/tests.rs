@@ -8,13 +8,15 @@ use std::sync::{
 
 use futures::channel::mpsc;
 use gpui::{
-    Bounds, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, TestAppContext,
-    VisualTestContext, px, size,
+    Bounds, Entity, EntityInputHandler as _, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
+    Pixels, TestAppContext, VisualTestContext, px, size,
 };
 
 use super::{Rio, Tab, Updates, theme::Theme};
 use crate::{
+    Squad,
     app::{Core, Places, Snapshot, UpdateCheck},
+    draft::Draft,
     opponent::Front,
     settings::{Settings, ThemeChoice},
     store::{Counsel, Fought, Ground, Kept, Likely, Player, Store, Tried},
@@ -136,6 +138,7 @@ fn opponent() -> Opponent {
         attack,
         wins,
         battles,
+        registered: false,
     };
     let own = Likely {
         rest: BEHIND[0],
@@ -144,6 +147,7 @@ fn opponent() -> Opponent {
         others: 0,
         others_before: 0,
         mine: false,
+        registered: false,
         attacks: vec![tried(ATTACKS[0], 2, 3), tried(ATTACKS[1], 1, 2)],
     };
     let others = Likely {
@@ -153,6 +157,7 @@ fn opponent() -> Opponent {
         others: 2,
         others_before: 0,
         mine: true,
+        registered: false,
         attacks: Vec::new(),
     };
     Opponent {
@@ -709,7 +714,7 @@ fn a_student_who_cannot_be_barred_says_why(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(core.places.database.parent().unwrap()).unwrap();
     right_click(vcx, "face:attack-0-0-2");
     click(vcx, "menu:編成NG");
-    assert!(has(vcx, "bar-error"), "why, in the page");
+    assert!(has(vcx, "keep-error"), "why, in the page");
     assert!(!has(vcx, "excluded:attack-0-1"), "and nobody is barred");
 }
 
@@ -731,4 +736,286 @@ fn the_menu_goes_as_another_page_opens(cx: &mut TestAppContext) {
     assert!(!has(vcx, "student-menu"), "the menu is not of this page");
     turn(vcx, Tab::Match);
     assert!(!has(vcx, "student-menu"), "and does not come back");
+}
+
+/// The window with the tab open the formations are put together in (編成追加).
+fn compose(cx: &mut TestAppContext) -> (Entity<Rio>, Arc<Core>, &mut VisualTestContext) {
+    let (rio, core, vcx) = open(cx);
+    click(vcx, "tab:編成追加");
+    (rio, core, vcx)
+}
+
+/// Whether what `inner` finds lies within what `outer` finds.
+fn within(vcx: &mut VisualTestContext, inner: &str, outer: &str) -> bool {
+    let (Some(inner), Some(outer)) = (bounds(vcx, inner), bounds(vcx, outer)) else {
+        return false;
+    };
+    outer.contains(&inner.origin)
+        && outer.contains(&(inner.bottom_right() - gpui::point(px(1.), px(1.))))
+}
+
+/// The teams as far as they are put together.
+fn draft(rio: &Entity<Rio>, vcx: &mut VisualTestContext) -> Draft {
+    rio.read_with(vcx, |rio, _| rio.draft.clone())
+}
+
+/// Drags what `from` finds onto what `to` finds.
+fn drag(vcx: &mut VisualTestContext, from: &str, to: &str) {
+    let middle = |vcx: &mut VisualTestContext, selector: &str| {
+        let found = bounds(vcx, selector).unwrap_or_else(|| panic!("{selector} is not there"));
+        found.center()
+    };
+    let (from, to) = (middle(vcx, from), middle(vcx, to));
+    let none = Modifiers::none();
+    vcx.simulate_mouse_down(from, MouseButton::Left, none);
+    vcx.simulate_mouse_move(from + gpui::point(px(8.), px(8.)), MouseButton::Left, none);
+    vcx.simulate_mouse_move(to, MouseButton::Left, none);
+    vcx.simulate_mouse_up(to, MouseButton::Left, none);
+    vcx.run_until_parked();
+}
+
+/// Types into the search field as the IME would, the text settled.
+fn search(rio: &Entity<Rio>, vcx: &mut VisualTestContext, typed: &str) {
+    let field = rio.read_with(vcx, |rio, _| rio.query.clone());
+    field.update_in(vcx, |field, window, cx| {
+        let all = 0..field.text().encode_utf16().count();
+        field.replace_text_in_range(Some(all), typed, window, cx);
+    });
+    vcx.run_until_parked();
+}
+
+/// アイリ, the first student by name and a special; アイリ（バンド）, the next, a striker.
+const AIRI: i64 = 23000;
+const AIRI_BAND: i64 = 16015;
+
+#[gpui::test]
+fn the_compose_tab_starts_with_the_attacks_first_striker_chosen(cx: &mut TestAppContext) {
+    let (_, _, vcx) = compose(cx);
+    // The attack's six places over the defense's six, the button at their right.
+    let place = |vcx: &mut VisualTestContext, at: usize| {
+        bounds(vcx, &format!("place:{at}")).unwrap_or_else(|| panic!("no place {at}"))
+    };
+    let (first, under, last) = (place(vcx, 0), place(vcx, 6), place(vcx, 11));
+    assert!(first.top() < under.top() && first.left() == under.left());
+    assert!(shows(vcx, "攻め") && shows(vcx, "防衛"));
+    let (fourth, special) = (place(vcx, 3), place(vcx, 4));
+    assert!(
+        special.left() - fourth.right() > fourth.left() - place(vcx, 2).right(),
+        "the specials stand apart"
+    );
+    let register = bounds(vcx, "register").expect("the button");
+    assert!(place(vcx, 5).right() < register.left() && last.right() < register.left());
+    // Under them the search and the students, by name.
+    let (field, students) = (
+        bounds(vcx, "search").expect("the search field"),
+        bounds(vcx, "students").expect("the list"),
+    );
+    assert!(last.bottom() < field.top() && field.bottom() <= students.top());
+    let (airi, band) = (
+        bounds(vcx, "tile:23000").expect("アイリ"),
+        bounds(vcx, "tile:16015").expect("アイリ（バンド）"),
+    );
+    assert!(airi.left() < band.left() && airi.top() == band.top());
+    assert!(airi.top() >= students.top());
+    // The place chosen has the corners; a click chooses another.
+    assert!(within(vcx, "cursor", "place:0"));
+    click(vcx, "place:8");
+    assert!(within(vcx, "cursor", "place:8") && !within(vcx, "cursor", "place:0"));
+}
+
+#[gpui::test]
+fn a_student_clicked_goes_into_the_place_chosen_and_the_next_is_chosen(cx: &mut TestAppContext) {
+    let (rio, _, vcx) = compose(cx);
+    // A special does not go into a striker's place, and the window says why.
+    click(vcx, &format!("tile:{AIRI}"));
+    assert!(shows(
+        vcx,
+        "ストライカーの枠には、ストライカーの生徒を入れます。"
+    ));
+    assert_eq!(draft(&rio, vcx).at(0), None);
+    assert!(within(vcx, "cursor", "place:0"));
+    // A striker does, and the place to the right is chosen.
+    click(vcx, &format!("tile:{AIRI_BAND}"));
+    assert_eq!(draft(&rio, vcx).at(0), Some(AIRI_BAND));
+    assert!(within(vcx, "cursor", "place:1"));
+    // After the fourth striker the left special, and after the attack's right special the
+    // defense's first striker.
+    click(vcx, "place:3");
+    click(vcx, &format!("tile:{AIRI_BAND}"));
+    assert!(within(vcx, "cursor", "place:4"));
+    assert_eq!(
+        (draft(&rio, vcx).at(0), draft(&rio, vcx).at(3)),
+        (None, Some(AIRI_BAND)),
+        "she moved: a student stands once in a team"
+    );
+    click(vcx, "place:5");
+    click(vcx, &format!("tile:{AIRI}"));
+    assert_eq!(draft(&rio, vcx).at(5), Some(AIRI));
+    assert!(within(vcx, "cursor", "place:6"));
+}
+
+#[gpui::test]
+fn the_students_are_narrowed_by_the_name_and_the_buttons(cx: &mut TestAppContext) {
+    let (rio, _, vcx) = compose(cx);
+    let shown = |vcx: &mut VisualTestContext, students: &[i64]| -> Vec<bool> {
+        let tile = |student: &i64| has(vcx, &format!("tile:{student}"));
+        students.iter().map(tile).collect()
+    };
+    // ホシノ (a tank of pierce), her swimsuit (a supporter of explosion), and the two of
+    // the last stand (a tank and an attacker of mystic); アル is another.
+    let hoshinos = [10005, 10045, 10098, 10099, 10000];
+    search(&rio, vcx, "ほしの");
+    assert_eq!(shown(vcx, &hoshinos), [true, true, true, true, false]);
+    // One class: the tanks.
+    click(vcx, "filter:タンク");
+    assert!(has(vcx, "pressed:タンク"), "the button stays pressed");
+    assert_eq!(shown(vcx, &hoshinos), [true, false, true, false, false]);
+    // Another class as well: either.
+    click(vcx, "filter:サポーター");
+    assert_eq!(shown(vcx, &hoshinos), [true, true, true, false, false]);
+    // An attack type: with the classes, both have to fit.
+    click(vcx, "filter:神秘");
+    assert_eq!(shown(vcx, &hoshinos), [false, false, true, false, false]);
+    // An armor type none of them has: nobody, and the window says so.
+    click(vcx, "filter:弾力装甲");
+    assert_eq!(shown(vcx, &hoshinos), [false; 5]);
+    assert!(shows(vcx, "当てはまる生徒がいません。"));
+    // Pressed again, the buttons are let up; the name cleared, everybody is back.
+    for pressed in ["弾力装甲", "神秘", "サポーター", "タンク"] {
+        click(vcx, &format!("pressed:{pressed}"));
+    }
+    assert!(has(vcx, "filter:タンク") && !has(vcx, "pressed:タンク"));
+    search(&rio, vcx, "");
+    assert!(has(vcx, &format!("tile:{AIRI}")) && has(vcx, "tile:16017"));
+}
+
+#[gpui::test]
+fn students_and_places_are_dragged(cx: &mut TestAppContext) {
+    let (rio, _, vcx) = compose(cx);
+    // A student of the list is thrown straight into a place: the place chosen stays.
+    drag(vcx, &format!("tile:{AIRI_BAND}"), "place:2");
+    assert_eq!(draft(&rio, vcx).at(2), Some(AIRI_BAND));
+    assert!(within(vcx, "cursor", "place:0"));
+    drag(vcx, &format!("tile:{AIRI}"), "place:10");
+    assert_eq!(draft(&rio, vcx).at(10), Some(AIRI));
+    // Not into a place of the other squad.
+    drag(vcx, &format!("tile:{AIRI}"), "place:1");
+    assert_eq!(draft(&rio, vcx).at(1), None);
+    assert!(shows(
+        vcx,
+        "ストライカーの枠には、ストライカーの生徒を入れます。"
+    ));
+    // Two places change their students, across the teams too.
+    drag(vcx, "place:2", "place:7");
+    assert_eq!(
+        (draft(&rio, vcx).at(2), draft(&rio, vcx).at(7)),
+        (None, Some(AIRI_BAND))
+    );
+    drag(vcx, &format!("tile:{}", 16017), "place:2");
+    drag(vcx, "place:7", "place:2");
+    assert_eq!(
+        (draft(&rio, vcx).at(2), draft(&rio, vcx).at(7)),
+        (Some(AIRI_BAND), Some(16017))
+    );
+    // A striker and a special do not.
+    drag(vcx, "place:10", "place:7");
+    assert_eq!(
+        (draft(&rio, vcx).at(10), draft(&rio, vcx).at(7)),
+        (Some(AIRI), Some(16017))
+    );
+}
+
+/// Puts a team into the places from `first` on.
+fn fill(rio: &Entity<Rio>, vcx: &mut VisualTestContext, first: usize, team: [i64; 6]) {
+    rio.update(vcx, |rio, cx| {
+        for (at, student) in team.into_iter().enumerate() {
+            let squad = if at < 4 { Squad::Main } else { Squad::Support };
+            rio.draft.drop_on(first + at, student, squad).unwrap();
+        }
+        cx.notify();
+    });
+    vcx.run_until_parked();
+}
+
+/// A defense behind `FRONT`.
+const DEFENSE: [i64; 6] = [13010, 10037, 10062, 10006, 20016, 20053];
+
+#[gpui::test]
+fn a_formation_is_registered_once_it_is_whole_and_shows_against_its_front(cx: &mut TestAppContext) {
+    let (rio, core, vcx) = compose(cx);
+    // An opponent with the front, nothing known behind it.
+    set(&core, vcx, |snapshot| {
+        let mut unseen = opponent();
+        unseen.counsel = Counsel { likely: Vec::new() };
+        snapshot.opponent = Some(unseen);
+    });
+    let registered = |core: &Core| {
+        let records = Store::open(&core.places.database).unwrap();
+        records.counsel(&FRONT, None, 0).unwrap().likely
+    };
+    // Half put together, the button registers nothing.
+    fill(&rio, vcx, 0, ATTACKS[0]);
+    click(vcx, "register");
+    assert!(registered(&core).is_empty());
+    assert!(!shows(vcx, "登録しました"));
+    // Whole, it does, once; the places keep their students.
+    fill(&rio, vcx, 6, DEFENSE);
+    click(vcx, "register");
+    assert!(shows(vcx, "登録しました"));
+    assert_eq!(registered(&core).len(), 1, "kept with the records");
+    click(vcx, "register");
+    assert!(shows(vcx, "登録済みです"));
+    assert_eq!(registered(&core)[0].attacks.len(), 1);
+    assert_eq!(draft(&rio, vcx).teams(), Some((ATTACKS[0], DEFENSE)));
+    // Against the opponent with that front it is counselled at once.
+    click(vcx, "tab:対戦");
+    assert!(shows(vcx, "登録した編成"), "what makes the defense likely");
+    assert!(has(vcx, "candidate:likely-0") && has(vcx, "candidate:attack-0-0"));
+    assert!(has(vcx, "registered:attack-0-0") && shows(vcx, "登録"));
+    click(vcx, "candidate:attack-0-0");
+    // The records keep a team's specials the smaller id first.
+    let kept = [10005, 10037, 10059, 10006, 20008, 20016];
+    assert_eq!(
+        core.chosen(),
+        choice([10037, 10062, 10006], Some(kept)),
+        "to choose like any other"
+    );
+    // Its word's menu takes the registration away.
+    right_click(vcx, "registered:attack-0-0");
+    assert!(has(vcx, "menu:登録を消す"));
+    click(vcx, "menu:登録を消す");
+    assert!(registered(&core).is_empty());
+    assert!(!has(vcx, "candidate:likely-0"));
+    assert!(shows(
+        vcx,
+        "同じ D1 とスペシャルの防衛は、まだ登録がありません。"
+    ));
+}
+
+#[gpui::test]
+fn the_least_window_shows_the_teams_the_search_and_three_rows_of_students(cx: &mut TestAppContext) {
+    let (_, _, vcx) = compose(cx);
+    let (wide, tall) = super::WINDOW_LEAST;
+    vcx.simulate_resize(size(px(wide), px(tall)));
+    vcx.run_until_parked();
+    // The button beside the teams, the search and every button of it are within the width.
+    let mut parts = vec!["place:5", "place:11", "register", "search"];
+    parts.extend(["filter:タンク", "filter:TS", "filter:爆発", "filter:振動"]);
+    parts.extend(["filter:軽装備", "filter:弾力装甲"]);
+    for part in parts {
+        let found = bounds(vcx, part).unwrap_or_else(|| panic!("{part} is not there"));
+        assert!(
+            found.left() >= px(0.) && found.right() <= px(wide),
+            "{part} is cut: {found:?}"
+        );
+    }
+    assert!(bounds(vcx, "place:5").unwrap().right() < bounds(vcx, "register").unwrap().left());
+    // Three rows of students show whole.
+    let (students, first) = (
+        bounds(vcx, "students").expect("the list"),
+        bounds(vcx, &format!("tile:{AIRI}")).expect("the first student"),
+    );
+    let rows = (students.bottom() - first.top()) / (first.size.height + px(4.));
+    assert!((3. ..3.5).contains(&rows), "{rows} rows of students show");
+    assert!(students.bottom() <= px(tall));
 }

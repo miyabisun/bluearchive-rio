@@ -3,6 +3,8 @@
 //! window.
 
 use crate::{
+    Squad,
+    draft::Refused,
     store::{Fought, Ground, Likely, SHOWN, Tried},
     watch::{Screen, Status},
 };
@@ -102,6 +104,9 @@ pub fn basis(likely: &Likely) -> Vec<String> {
     if likely.mine {
         said.push("自分の防衛".to_owned());
     }
+    if likely.registered {
+        said.push("登録".to_owned());
+    }
     said
 }
 
@@ -109,15 +114,22 @@ pub fn basis(likely: &Likely) -> Vec<String> {
 pub fn ground(ground: Ground) -> &'static str {
     match ground {
         Ground::Theirs => "本人が使った編成（過去1か月）",
+        Ground::Registered => "登録した編成",
         Ground::Trend => "流行（過去2週間）",
         Ground::Before => "それより前の記録",
         Ground::Mine => "自分の防衛だけにある編成",
     }
 }
 
-/// How an attack fared against the defense: "3戦2勝".
+/// How an attack fared against the defense: "3戦2勝"; one the user registered says so
+/// ("登録・3戦2勝"), and alone where no battle is kept with it ("登録").
 pub fn fared(tried: &Tried) -> String {
-    format!("{}戦{}勝", tried.battles, tried.wins)
+    let battles = format!("{}戦{}勝", tried.battles, tried.wins);
+    match (tried.registered, tried.battles) {
+        (false, _) => battles,
+        (true, 0) => "登録".to_owned(),
+        (true, _) => format!("登録・{battles}"),
+    }
 }
 
 /// Why a student is left out of the attacks the user may take: not among the students Aoi
@@ -184,6 +196,14 @@ pub fn reasons(out: Out) -> Vec<&'static str> {
         said.push("編成NG（右クリックで外せます）");
     }
     said
+}
+
+/// Why a student did not go into a place of a formation put together by hand.
+pub fn refused(refused: Refused) -> &'static str {
+    match refused.takes {
+        Squad::Main => "ストライカーの枠には、ストライカーの生徒を入れます。",
+        Squad::Support => "スペシャルの枠には、スペシャルの生徒を入れます。",
+    }
 }
 
 /// When a battle was kept, short: "11-17 13:14" of "2026-11-17 13:14:04".
@@ -296,6 +316,7 @@ mod tests {
             others: 0,
             others_before: 0,
             mine: false,
+            registered: false,
             attacks: Vec::new(),
         };
         assert_eq!(basis(&likely), ["本人 11-17"]);
@@ -309,6 +330,8 @@ mod tests {
         assert_eq!(basis(&likely), ["ほか 1人（2週間より前）", "自分の防衛"]);
         likely.others_before = 0;
         assert_eq!(basis(&likely), ["自分の防衛"]);
+        likely.registered = true;
+        assert_eq!(basis(&likely), ["自分の防衛", "登録"], "registered by hand");
     }
 
     #[test]
@@ -335,6 +358,7 @@ mod tests {
             attack: [first, 2, 3, 4, 5, 6],
             wins: 1,
             battles: 1,
+            registered: false,
         };
         // The best first, as the records order them: the first and the third need a student
         // the user does not hold or has barred.
@@ -390,12 +414,18 @@ mod tests {
 
     #[test]
     fn an_attack_is_told_by_its_battles_and_wins() {
-        let tried = Tried {
+        let mut tried = Tried {
             attack: [1, 2, 3, 4, 5, 6],
             wins: 2,
             battles: 3,
+            registered: false,
         };
         assert_eq!(fared(&tried), "3戦2勝");
+        // One the user registered says so, with its battles if it has any.
+        tried.registered = true;
+        assert_eq!(fared(&tried), "登録・3戦2勝");
+        (tried.wins, tried.battles) = (0, 0);
+        assert_eq!(fared(&tried), "登録");
     }
 
     #[test]
