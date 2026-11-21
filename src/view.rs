@@ -5,6 +5,7 @@
 use crate::{
     source::Reported,
     store::{Fought, Ground, Likely, SHOWN, Tried},
+    tier::Sorted,
     watch::{Screen, Status},
 };
 
@@ -220,6 +221,14 @@ pub fn reasons(out: Out) -> Vec<&'static str> {
     said
 }
 
+/// What a hover says of where the user sorted a student, a line each: her tier, and that
+/// she is barred. Neither depends on the other.
+pub fn stands(sorted: Sorted) -> Vec<String> {
+    let tier = sorted.tier.map(|tier| format!("Tier {}", tier.name()));
+    let barred = sorted.barred.then(|| "編成NG".to_owned());
+    tier.into_iter().chain(barred).collect()
+}
+
 /// When a battle was kept, short: "11-17 13:14" of "2026-11-17 13:14:04".
 pub fn kept_at(seen_at: &str) -> &str {
     seen_at.get(5..16).unwrap_or(seen_at)
@@ -276,11 +285,12 @@ pub fn update_text(update: &UpdateState) -> String {
 mod tests {
     use super::{
         Out, Tone, basis, fared, fared_parts, fought_at, kept_at, left_out, offered, out, reported,
-        status_view,
+        stands, status_view,
     };
     use crate::{
         source::Reported,
         store::{Fought, Ground, Likely, Tried},
+        tier::{Sorted, Tier},
         watch::{Screen, Status},
     };
 
@@ -426,6 +436,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             "11 and 18, 90 and 98 are registered"
         );
+    }
+
+    #[test]
+    fn a_hover_tells_a_students_tier_and_that_she_is_barred_each_by_itself() {
+        let told = |tier, barred| stands(Sorted { tier, barred });
+        assert!(told(None, false).is_empty(), "nothing of one in no row");
+        assert_eq!(told(Some(Tier::A), false), ["Tier A"]);
+        assert_eq!(told(None, true), ["編成NG"]);
+        assert_eq!(told(Some(Tier::S), true), ["Tier S", "編成NG"]);
     }
 
     #[test]

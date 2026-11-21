@@ -19,7 +19,8 @@ use crate::{
     ARMOR_MARK, ATTACK_MARK, Armor, Attack, Role as Class, Squad, Student,
     draft::takes,
     search::{self, Filter},
-    tier::Row,
+    tier::{Row, Sorted},
+    view,
 };
 
 /// The sides of a student's icon in a list.
@@ -49,11 +50,18 @@ impl Finder {
     }
 }
 
-/// What is dragged: a student of a list or of a tier, or the student standing at a place of
-/// the teams put together.
+/// What is dragged: a student's tile, or the student standing at a place of the teams put
+/// together. A tile tells the row of the table it was dragged from (none: a list) and where
+/// the student stands in the table: a row takes what it would change, the list of the table
+/// takes her out of the row her tile came from (`tier::dropped`).
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Dragged {
-    Student(i64, Squad),
+    Student {
+        id: i64,
+        squad: Squad,
+        from: Option<Row>,
+        sorted: Sorted,
+    },
     Place(usize),
 }
 
@@ -61,7 +69,7 @@ impl Dragged {
     /// The squad of the student dragged: a place of the other squad takes no drop of it.
     pub(super) fn squad(self) -> Squad {
         match self {
-            Self::Student(_, squad) => squad,
+            Self::Student { squad, .. } => squad,
             Self::Place(place) => takes(place),
         }
     }
@@ -181,16 +189,24 @@ impl Rio {
 
     /// A student's icon, `size` square, to pick or to drag: in a frame of `frame`, over the
     /// attack type's colour at the upper left and the armor type's at the lower right. The
-    /// name, the attributes and the `row` of the table the student stands in (a tier, or
-    /// 編成NG) are on a hover. The tests find it as `<kind>:<id>`.
+    /// name, the attributes and where the student stands in the table as `sorted` tells it
+    /// (her tier, 編成NG) are on a hover. `from` is the row of the table the tile stands in
+    /// (none: a list): a student of a tier and barred has a tile in each, so the tests find
+    /// a list's as `tile:<id>`, a tier's as `tiered:<id>` and one among those barred as
+    /// `barred:<id>`.
     pub(super) fn tile(
         student: &Student,
-        kind: &'static str,
+        from: Option<Row>,
         size: Pixels,
         frame: Hsla,
-        row: Option<Row>,
+        sorted: Sorted,
     ) -> Stateful<Div> {
         let (id, squad) = (student.id, student.squad);
+        let kind = match from {
+            None => "tile",
+            Some(Row::Tier(_)) => "tiered",
+            Some(Row::Barred) => "barred",
+        };
         // The two colours meet along the line from the upper right to the lower left, run
         // into each other over the middle tenth.
         let ground = linear_gradient(
@@ -205,10 +221,9 @@ impl Rio {
             student.attack.name(),
             student.armor.name()
         );
-        match row {
-            Some(Row::Tier(tier)) => told.push_str(&format!("\nTier {}", tier.name())),
-            Some(Row::Barred) => told.push_str("\n編成NG"),
-            None => {}
+        for line in view::stands(sorted) {
+            told.push('\n');
+            told.push_str(&line);
         }
         div()
             .id(SharedString::from(format!("{kind}-{id}")))
@@ -224,9 +239,15 @@ impl Rio {
             .border_color(frame)
             .bg(ground)
             .child(icons::student(id, size - px(4.)))
-            .on_drag(Dragged::Student(id, squad), move |_, _, _, cx| {
-                cx.new(|_| Ghost { student: id, size })
-            })
+            .on_drag(
+                Dragged::Student {
+                    id,
+                    squad,
+                    from,
+                    sorted,
+                },
+                move |_, _, _, cx| cx.new(|_| Ghost { student: id, size }),
+            )
     }
 
     /// The colour of a squad's frame: red for the strikers, blue for the specials.

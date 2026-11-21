@@ -24,7 +24,7 @@ use crate::{
     search::{self, Filter},
     source::{self, Source},
     store::{self, Amended, Registered},
-    tier::{self, Row},
+    tier::{self, Sorted},
 };
 
 /// The sides of a place's icon, at most and at least: the two teams stay beside the button
@@ -205,21 +205,23 @@ impl Rio {
             squads: vec![takes(self.draft.chosen())],
             ..finder.filter.clone()
         };
-        // Those the user sorted into a tier first, the highest tier before the others, and
-        // those barred last (a formation told of may hold them); by name within each.
+        // Those the user sorted into a tier first, the highest tier before the others; by
+        // name within each. Whether a student is barred has no say here: a formation told
+        // of, and an opponent's, hold whom they hold (the user, 2026-11-21).
         let found = search::found(&self.roster, &query, &offered);
-        let found = tier::by_tier(found, &self.shown.tiers, &self.shown.barred);
+        let found = tier::by_tier(found, &self.shown.tiers);
         let tiles: Vec<_> = (found.into_iter())
             .map(|student| {
                 let (id, squad) = (student.id, student.squad);
-                // The list is of one squad: the frame tells the row of the table.
-                let row = self.row_of(id);
-                let frame = match row {
-                    Some(Row::Tier(tier)) => theme::tier_colour(tier),
-                    Some(Row::Barred) => theme.danger,
-                    None => theme.border,
+                // The list is of one squad: the frame tells the tier, and so does the
+                // hover, which tells nothing of those barred.
+                let tier = tier::of(&self.shown.tiers, id);
+                let frame = tier.map_or(theme.border, theme::tier_colour);
+                let sorted = Sorted {
+                    tier,
+                    ..Sorted::default()
                 };
-                Self::tile(student, "tile", TILE, frame, row)
+                Self::tile(student, None, TILE, frame, sorted)
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| this.put(id, squad, cx)))
             })
@@ -430,7 +432,7 @@ impl Rio {
     /// squad (`can_drop`), so nothing is refused here.
     fn dropped(&mut self, place: usize, dragged: Dragged, cx: &mut Context<Self>) {
         let _ = match dragged {
-            Dragged::Student(student, squad) => self.draft.drop_on(place, student, squad),
+            Dragged::Student { id, squad, .. } => self.draft.drop_on(place, id, squad),
             Dragged::Place(from) => self.draft.swap(from, place),
         };
         cx.notify();

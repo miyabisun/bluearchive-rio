@@ -15,7 +15,7 @@ use futures::channel::mpsc::UnboundedSender;
 use crate::{
     source::Source,
     store::{Amended, Kept, Registered, Store},
-    tier::{Row, Tier},
+    tier::Tier,
     update,
     watch::{self, Choice, Opponent, Status, Update},
 };
@@ -156,29 +156,20 @@ impl Core {
     }
 
     /// Bars a student from the user's attacks (編成NG) or lets the student back in, kept
-    /// with the records (see `sorted`).
+    /// with the records (see `sorted`). The student's tier stays as it is.
     pub fn bar(&self, student: i64, barred: bool) -> Result<(), String> {
         self.sorted(student, barred, |store| store.bar(student, barred))
     }
 
-    /// Puts a student into a row of the table (Tier表: a tier, or those barred), out of the
-    /// row the student stood in; `None` takes the student out of every row.
-    pub fn sort(&self, student: i64, row: Option<Row>) -> Result<(), String> {
-        let barred = row == Some(Row::Barred);
-        self.sorted(student, barred, |store| match row {
-            Some(Row::Tier(tier)) => store.rank(student, Some(tier)),
-            Some(Row::Barred) => store.bar(student, true),
-            None => {
-                store.rank(student, None)?;
-                store.bar(student, false)
-            }
-        })
+    /// Puts a student into a tier, out of the one the student was in; `None` takes the
+    /// student out of the tiers. Whether the student is barred stays as it is.
+    pub fn rank(&self, student: i64, tier: Option<Tier>) -> Result<(), String> {
+        self.sorted(student, false, |store| store.rank(student, tier))
     }
 
     /// Keeps a change to where a student stands, and shows the tiers and those barred as
-    /// the records have them now (a student stands in one row only). An attack chosen with
-    /// a student now `barred` is given up, its defense kept: nobody the user cannot send is
-    /// marked over the game.
+    /// the records have them now. An attack chosen with a student now `barred` is given
+    /// up, its defense kept: nobody the user cannot send is marked over the game.
     fn sorted(
         &self,
         student: i64,

@@ -1157,7 +1157,7 @@ fn the_squads_buttons_narrow_the_tier_tabs_students_only(cx: &mut TestAppContext
 
 #[gpui::test]
 fn the_teams_are_put_together_from_the_higher_tiers_first(cx: &mut TestAppContext) {
-    let (rio, core, vcx) = compose(cx);
+    let (_, core, vcx) = compose(cx);
     let left_of = |vcx: &mut VisualTestContext, students: &[i64]| -> bool {
         let lefts: Vec<_> = (students.iter())
             .map(|student| {
@@ -1188,19 +1188,67 @@ fn the_teams_are_put_together_from_the_higher_tiers_first(cx: &mut TestAppContex
         left_of(vcx, &[AIRI, 20019]),
         "アイリ, then アカネ（バニーガール）"
     );
-    // Those barred are still offered (a formation told of may hold them), after all the
-    // others: アカネ of a tier until she is barred, then after アカリ, who has none.
+    // One barred is offered like anybody (a formation told of, and an opponent's, hold whom
+    // they hold): アル keeps the place her tier gives her, and アオバ, of no tier, hers by
+    // name before アカリ.
     click(vcx, "place:0");
-    search(&rio, vcx, "あか");
-    assert!(
-        left_of(vcx, &[13000, 13002]),
-        "アカネ of a tier, then アカリ"
-    );
+    set(&core, vcx, |snapshot| snapshot.barred = vec![10000, 16017]);
+    assert!(left_of(
+        vcx,
+        &[10005, 13000, 10000, AIRI_BAND, 16017, 13002]
+    ));
+}
+
+/// トキ, a striker.
+const TOKI: i64 = 10062;
+
+#[gpui::test]
+fn one_barred_is_put_into_a_formation_and_an_opponents_like_anybody(cx: &mut TestAppContext) {
+    let (rio, core, vcx) = compose(cx);
+    // An opponent with the front, nothing known behind it.
     set(&core, vcx, |snapshot| {
-        snapshot.tiers.retain(|(student, _)| *student != 13000);
-        snapshot.barred = vec![13000];
+        let mut unseen = opponent();
+        unseen.counsel = Counsel { likely: Vec::new() };
+        snapshot.opponent = Some(unseen);
     });
-    assert!(left_of(vcx, &[13002, 13000]), "アカリ, then アカネ, barred");
+    // トキ of a tier, whom the user cannot send: she stands where her tier puts her, before
+    // the first by name.
+    core.rank(TOKI, Some(Tier::A)).unwrap();
+    core.bar(TOKI, true).unwrap();
+    let toki = format!("tile:{TOKI}");
+    let at = |vcx: &mut VisualTestContext, tile: &str| {
+        let found = bounds(vcx, tile).unwrap_or_else(|| panic!("{tile} is not offered"));
+        (found.top(), found.left())
+    };
+    assert!(at(vcx, &toki) < at(vcx, &format!("tile:{AIRI_BAND}")));
+    // The teams but for her, with ミカ and ハスミ（水着） in her places.
+    fill(&rio, vcx, 0, ATTACKS[0]);
+    fill(&rio, vcx, 6, [13010, 10037, 10124, 10006, 20016, 20053]);
+    // A click puts her into a place of the attack, and into one of the defense.
+    click(vcx, "place:2");
+    click(vcx, &toki);
+    click(vcx, "place:8");
+    click(vcx, &toki);
+    assert_eq!(draft(&rio, vcx).teams(), Some((ATTACKS[1], DEFENSE)));
+    // What the reading reports meanwhile changes nothing of it.
+    set(&core, vcx, |snapshot| {
+        snapshot.status = Status::Watching(None)
+    });
+    assert_eq!(draft(&rio, vcx).teams(), Some((ATTACKS[1], DEFENSE)));
+    // The formation is registered like any other.
+    click(vcx, "register");
+    assert!(shows(vcx, "登録しました"));
+    let kept = kept_registered(&core);
+    assert_eq!(kept.len(), 1);
+    assert!(kept[0].attack.contains(&TOKI) && kept[0].defense.contains(&TOKI));
+    // Against the opponent, the defense with her is offered and chosen as any; the attack
+    // with her is the one set aside: that she is barred tells of the user's attacks alone.
+    click(vcx, "tab:対戦");
+    assert!(has(vcx, "supplied:likely-0-2") && !has(vcx, "out:likely-0-2"));
+    click(vcx, "candidate:likely-0");
+    assert_eq!(core.chosen(), choice([10037, 10062, 10006], None));
+    assert!(has(vcx, "excluded:attack-0-0") && has(vcx, "out:attack-0-0-2"));
+    assert!(!has(vcx, "candidate:attack-0-0"));
 }
 
 #[gpui::test]
@@ -1263,7 +1311,7 @@ fn a_row_of_the_table_is_as_tall_empty_as_with_a_student(cx: &mut TestAppContext
     drag(vcx, &format!("tile:{AIRI_BAND}"), "tier:A");
     assert!(within(vcx, &format!("tiered:{AIRI_BAND}"), "tier:A"));
     drag(vcx, &format!("tile:{AIRI}"), "tier:NG");
-    assert!(within(vcx, &format!("tiered:{AIRI}"), "tier:NG"));
+    assert!(within(vcx, &format!("barred:{AIRI}"), "tier:NG"));
     assert_eq!(tall(vcx, "tier:A"), empty, "the row keeps its height");
     assert_eq!(tall(vcx, "tier:NG"), empty);
     let now = bounds(vcx, "students").expect("the list").top();
@@ -1310,33 +1358,59 @@ fn the_window_has_three_tabs_and_the_third_has_its_sub_tabs(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn a_student_is_dragged_into_the_row_of_those_barred_and_out_again(cx: &mut TestAppContext) {
+fn a_student_is_barred_in_the_table_whatever_her_tier(cx: &mut TestAppContext) {
     let (_, core, vcx) = tiers(cx);
-    let (tile, tiered) = (format!("tile:{AIRI_BAND}"), format!("tiered:{AIRI_BAND}"));
-    // Into the row: she is barred (編成NG), stands there and no longer in the list.
+    let (tile, tiered, barred) = (
+        format!("tile:{AIRI_BAND}"),
+        format!("tiered:{AIRI_BAND}"),
+        format!("barred:{AIRI_BAND}"),
+    );
+    // From the list into the row of those barred (編成NG): she stands there and no longer
+    // in the list.
     drag(vcx, &tile, "tier:NG");
-    assert!(within(vcx, &tiered, "tier:NG") && !has(vcx, &tile));
+    assert!(within(vcx, &barred, "tier:NG") && !has(vcx, &tile));
     assert_eq!(kept_barred(&core), [AIRI_BAND], "kept");
-    // To a tier: let back in, and in the tier. A student stands in one row.
-    drag(vcx, &tiered, "tier:B");
-    assert!(within(vcx, &tiered, "tier:B") && !within(vcx, &tiered, "tier:NG"));
-    assert!(kept_barred(&core).is_empty());
-    assert_eq!(kept_tiers(&core), [(AIRI_BAND, Tier::B)]);
-    // From the tier to those barred: out of the tier.
-    drag(vcx, &tiered, "tier:NG");
-    assert!(within(vcx, &tiered, "tier:NG"));
-    assert_eq!(kept_barred(&core), [AIRI_BAND]);
     assert!(kept_tiers(&core).is_empty());
-    // Back onto the list: let back in.
+    // From there into a tier: of the tier and still barred, a tile in each row.
+    drag(vcx, &barred, "tier:B");
+    assert!(within(vcx, &tiered, "tier:B") && within(vcx, &barred, "tier:NG"));
+    assert_eq!(kept_barred(&core), [AIRI_BAND]);
+    assert_eq!(kept_tiers(&core), [(AIRI_BAND, Tier::B)]);
+    // To another tier: her tier alone changes. What the reading reports meanwhile changes
+    // nothing of the rows.
+    drag(vcx, &tiered, "tier:S");
+    set(&core, vcx, |snapshot| {
+        snapshot.status = Status::Watching(None)
+    });
+    assert!(within(vcx, &tiered, "tier:S") && within(vcx, &barred, "tier:NG"));
+    assert_eq!(kept_tiers(&core), [(AIRI_BAND, Tier::S)]);
+    // Her tier's tile back onto the list: out of the tiers and still barred, so not in the
+    // list.
     drag(vcx, &tiered, "students");
-    assert!(has(vcx, &tile) && !has(vcx, &tiered));
-    assert!(kept_barred(&core).is_empty() && kept_tiers(&core).is_empty());
+    assert!(!has(vcx, &tiered) && !has(vcx, &tile));
+    assert!(within(vcx, &barred, "tier:NG"));
+    assert!(kept_tiers(&core).is_empty());
+    assert_eq!(kept_barred(&core), [AIRI_BAND]);
+    // Another, of a tier, dragged into the row of those barred keeps her tier.
+    let (other, other_barred) = (format!("tiered:{AIRI}"), format!("barred:{AIRI}"));
+    drag(vcx, &format!("tile:{AIRI}"), "tier:A");
+    drag(vcx, &other, "tier:NG");
+    assert!(within(vcx, &other, "tier:A") && within(vcx, &other_barred, "tier:NG"));
+    assert_eq!(kept_tiers(&core), [(AIRI, Tier::A)]);
+    assert_eq!(kept_barred(&core), [AIRI_BAND, AIRI]);
+    // Her tile among those barred back onto the list: let back in, her tier kept.
+    drag(vcx, &other_barred, "students");
+    assert!(!has(vcx, &other_barred) && within(vcx, &other, "tier:A"));
+    assert_eq!(kept_barred(&core), [AIRI_BAND]);
+    assert_eq!(kept_tiers(&core), [(AIRI, Tier::A)]);
+    // The first, in no tier, let back in: in the list again.
+    drag(vcx, &barred, "students");
+    assert!(has(vcx, &tile) && !has(vcx, &barred));
+    assert!(kept_barred(&core).is_empty());
 }
 
 #[gpui::test]
-fn a_student_barred_by_her_menu_leaves_her_tier_for_the_row_of_those_barred(
-    cx: &mut TestAppContext,
-) {
+fn a_student_barred_by_her_menu_keeps_her_tier_and_stands_in_both_rows(cx: &mut TestAppContext) {
     let (_, core, vcx) = open(cx);
     // ミカ of a tier, in the best attack.
     Store::open(&core.places.database)
@@ -1350,17 +1424,19 @@ fn a_student_barred_by_her_menu_leaves_her_tier_for_the_row_of_those_barred(
     right_click(vcx, "face:attack-0-0-2");
     click(vcx, "menu:編成NG");
     assert_eq!(kept_barred(&core), [MIKA]);
-    assert!(kept_tiers(&core).is_empty(), "out of her tier");
+    assert_eq!(kept_tiers(&core), [(MIKA, Tier::S)], "her tier stays");
     click(vcx, "tab:編成登録");
     click(vcx, "sub:Tier表");
-    let tiered = format!("tiered:{MIKA}");
-    assert!(within(vcx, &tiered, "tier:NG") && !within(vcx, &tiered, "tier:S"));
-    // Her menu lets her back in: she stands in no row, in the list again.
+    let (tiered, barred) = (format!("tiered:{MIKA}"), format!("barred:{MIKA}"));
+    assert!(within(vcx, &tiered, "tier:S") && within(vcx, &barred, "tier:NG"));
+    // Her menu lets her back in: out of the row of those barred, in her tier as before.
     click(vcx, "tab:対戦");
     right_click(vcx, "out:attack-0-1-2");
     click(vcx, "menu:編成NGを外す");
     click(vcx, "tab:編成登録");
-    assert!(!has(vcx, &tiered) && kept_barred(&core).is_empty());
+    assert!(within(vcx, &tiered, "tier:S") && !has(vcx, &barred));
+    assert!(kept_barred(&core).is_empty());
+    assert_eq!(kept_tiers(&core), [(MIKA, Tier::S)]);
 }
 
 /// What a formation was told with: its record and the page.

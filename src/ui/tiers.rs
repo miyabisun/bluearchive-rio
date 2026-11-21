@@ -1,8 +1,9 @@
 //! The sub-tab the user sorts the students in (Tier表): those they use often into tiers, to
 //! pick them quickly where a formation is put together, and those they cannot send into the
-//! row of the barred (編成NG). The table's rows stand over a search for the students in no
-//! row. Everything is done by a drag: into a row, from a row to another, and back onto the
-//! list to take a student out. A click does nothing.
+//! row of the barred (編成NG). The two do not depend on each other: a student of a tier who
+//! is barred stands in both rows. The table's rows stand over a search for the students in
+//! no row. Everything is done by a drag: into a row, from a row to another, and back onto
+//! the list to take a student out of the row dragged from. A click does nothing.
 
 use gpui::{
     AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -19,7 +20,7 @@ use super::{
 use crate::{
     Student,
     search::{self, Filter},
-    tier::{self, Row},
+    tier::{self, Change, Row, Sorted},
 };
 
 /// The sides of a student's icon in a row of the table: smaller than in the list, a row
@@ -34,22 +35,22 @@ const PLATE: Pixels = px(28.);
 /// the students to sort keep their room.
 const TABLE_MOST: f32 = 0.45;
 
-/// Whether what is dragged is a student (and no place of the teams put together).
-fn a_student(dragged: &dyn std::any::Any) -> bool {
-    matches!(
-        dragged.downcast_ref::<Dragged>(),
-        Some(Dragged::Student(..))
-    )
+/// The student whose tile is dragged and what dropping it onto a row of the table (none:
+/// the list) changes; none for what changes nothing there (a place of the teams put
+/// together, a row the student stands in already): no drop is taken then.
+fn change(dragged: &dyn std::any::Any, onto: Option<Row>) -> Option<(i64, Change)> {
+    match *dragged.downcast_ref::<Dragged>()? {
+        Dragged::Student {
+            id, from, sorted, ..
+        } => tier::dropped(sorted, from, onto).map(|change| (id, change)),
+        Dragged::Place(_) => None,
+    }
 }
 
 impl Rio {
-    /// The row a student stands in: among those barred, or in a tier.
-    pub(super) fn row_of(&self, student: i64) -> Option<Row> {
-        if self.shown.barred.contains(&student) {
-            Some(Row::Barred)
-        } else {
-            tier::of(&self.shown.tiers, student).map(Row::Tier)
-        }
+    /// Where a student stands in the table: her tier, and whether she is barred.
+    fn sorted(&self, student: i64) -> Sorted {
+        Sorted::of(&self.shown.tiers, &self.shown.barred, student)
     }
 
     /// The sub-tab: the table's rows (`Row::ALL`), the row that finds students, and the
@@ -65,7 +66,7 @@ impl Rio {
         let nobody = self.shown.tiers.is_empty();
         let rows = Row::ALL.into_iter().enumerate().map(|(at, one)| {
             let students: Vec<&Student> = (all.iter().copied())
-                .filter(|student| self.row_of(student.id) == Some(one))
+                .filter(|student| self.sorted(student.id).stands_in(one))
                 .collect();
             // With nobody in any tier yet, the first row says how one comes into it.
             let hint = (nobody && at == 0).then_some("一覧の生徒をドラッグして入れます");
@@ -87,10 +88,10 @@ impl Rio {
         let found = search::found(&self.roster, &query, &finder.filter);
         // Whoever stands in a row is there, not in the list.
         let tiles: Vec<_> = (found.into_iter())
-            .filter(|student| self.row_of(student.id).is_none())
+            .filter(|student| self.sorted(student.id) == Sorted::default())
             .map(|student| {
                 let frame = Self::squad_colour(student.squad);
-                Self::tile(student, "tile", TILE, frame, None).cursor_grab()
+                Self::tile(student, None, TILE, frame, Sorted::default()).cursor_grab()
             })
             .collect();
         let none = tiles.is_empty();
@@ -109,12 +110,12 @@ impl Rio {
             .when(none, |list| {
                 list.child(widgets::quiet(theme, "当てはまる生徒がいません。"))
             })
-            // A student dragged back onto the list leaves the table.
-            .can_drop(|dragged, _, _| a_student(dragged))
+            // A student dragged back onto the list leaves the row her tile came from.
+            .can_drop(|dragged, _, _| change(dragged, None).is_some())
             .drag_over::<Dragged>(move |style, _, _, _| style.bg(over))
             .on_drop(cx.listener(|this, dragged: &Dragged, _, cx| {
-                if let Dragged::Student(student, _) = *dragged {
-                    this.sort(student, None, cx);
+                if let Some((student, change)) = change(dragged, None) {
+                    this.sort(student, change, cx);
                 }
             }));
         div()
@@ -130,7 +131,7 @@ impl Rio {
 
     /// A row of the table, the `at`th from its top: its plate (a tier's letter on the
     /// tier's colour, NG on the colour of danger), then its students by name. What is
-    /// dropped on it comes into the row.
+    /// dropped on it comes into the row, and stays in the other kind of row it stands in.
     fn table_row(
         &self,
         theme: &Theme,
@@ -150,7 +151,8 @@ impl Rio {
         };
         let tiles = students.iter().map(|student| {
             let frame = Self::squad_colour(student.squad);
-            Self::tile(student, "tiered", TIERED, frame, Some(row)).cursor_grab()
+            let sorted = self.sorted(student.id);
+            Self::tile(student, Some(row), TIERED, frame, sorted).cursor_grab()
         });
         let over = theme.wash_base;
         div()
@@ -197,19 +199,24 @@ impl Rio {
                         )
                     }),
             )
-            .can_drop(|dragged, _, _| a_student(dragged))
+            .can_drop(move |dragged, _, _| change(dragged, Some(row)).is_some())
             .drag_over::<Dragged>(move |style, _, _, _| style.bg(over))
             .on_drop(cx.listener(move |this, dragged: &Dragged, _, cx| {
-                if let Dragged::Student(student, _) = *dragged {
-                    this.sort(student, Some(row), cx);
+                if let Some((student, change)) = change(dragged, Some(row)) {
+                    this.sort(student, change, cx);
                 }
             }))
     }
 
-    /// Puts a student into a row of the table, or takes the student out of it (see
-    /// `Core::sort`); a failure stays in the page until the next thing asked is kept.
-    fn sort(&mut self, student: i64, row: Option<Row>, cx: &mut Context<Self>) {
-        self.not_kept = self.core.sort(student, row).err();
+    /// Keeps what a drop in the table changed of where a student stands: her tier, or
+    /// whether she is barred (see `Core::rank` and `Core::bar`); a failure stays in the
+    /// page until the next thing asked is kept.
+    fn sort(&mut self, student: i64, change: Change, cx: &mut Context<Self>) {
+        let kept = match change {
+            Change::Tier(tier) => self.core.rank(student, tier),
+            Change::Barred(barred) => self.core.bar(student, barred),
+        };
+        self.not_kept = kept.err();
         cx.notify();
     }
 }
