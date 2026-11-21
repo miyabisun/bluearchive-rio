@@ -5,10 +5,14 @@
 #   bash tools/rust/follow.sh            tells both; ends with 10 when this repository is behind
 #   bash tools/rust/follow.sh --apply    follows: writes the newer Rust, runs every check with
 #                                        it and commits; leaves nothing changed if a check fails
-# The gate (.githooks/pre-push) runs the first on every push of main; FOLLOW_RUST=off
-# passes it by. What GitHub's runners carry is read from the list of software of their image:
-# the list the last release's run named, as GitHub has it now. Without gh or a connection
-# nothing is known, which is told and stops nobody.
+#   bash tools/rust/follow.sh --mend     for a newer Rust whose checks ask for the code to be
+#                                        mended: writes that Rust and commits nothing; with the
+#                                        code mended, --apply commits the mending and the Rust
+#                                        as one (the mending may not build with the older Rust)
+# The gate (.githooks/pre-push) follows on every push of main; FOLLOW_RUST=off passes it by.
+# What GitHub's runners carry is read from the list of software of their image: the list the
+# last release's run named, as GitHub has it now. Without gh or a connection nothing is
+# known, which is told and stops nobody.
 
 # The list of the software of the image the releases run on, where no run's log names one.
 SOFTWARE_LIST=images/windows/Windows2025-VS2026-Readme.md
@@ -63,30 +67,49 @@ runners_rust() {
     "repos/actions/runner-images/contents/${list:-$SOFTWARE_LIST}" 2> /dev/null | listed_rust
 }
 
-# Writes the Rust $1 in place of the pinned one, runs every check with it and commits; a
-# check that fails puts the pinned one back. The checks install the Rust first (rustup reads
-# rust-toolchain.toml); FOLLOW_RUST_CHECKS stands in for them in the tests.
+# Writes the Rust $1 into the working tree's rust-toolchain.toml.
+write_rust() {
+  pin "$1" < rust-toolchain.toml > rust-toolchain.toml.new && mv rust-toolchain.toml.new rust-toolchain.toml
+}
+
+# Follows the Rust $1: writes it in place of the pinned one, runs every check with it and
+# commits; a check that fails puts the pinned one back. Where the working tree has that Rust
+# written already ($2: --mend, and the code mended for it), the checks run on the tree as it
+# is and the commit takes all of it; a check that fails leaves the mending where it is.
+# The checks install the Rust first (rustup reads rust-toolchain.toml); FOLLOW_RUST_CHECKS
+# stands in for them in the tests.
 follow() {
-  local theirs=$1
-  if [ -n "$(git status --porcelain)" ]; then
+  local theirs=$1 written=$2 mending=
+  if [ "$written" = "$theirs" ]; then
+    mending=yes
+  elif [ -n "$(git status --porcelain)" ]; then
     echo "follow: the working tree has changes: commit or stash them, then follow" >&2
     return 2
+  else
+    write_rust "$theirs" || return 2
   fi
-  pin "$theirs" < rust-toolchain.toml > rust-toolchain.toml.new && mv rust-toolchain.toml.new rust-toolchain.toml || return 2
   if ! sh -c "${FOLLOW_RUST_CHECKS:-rustup toolchain install && sh tools/checks.sh}"; then
-    git checkout -q -- rust-toolchain.toml
-    echo "follow: a check failed with Rust $theirs: nothing was changed. Mend what it tells, then follow again" >&2
+    if [ -n "$mending" ]; then
+      echo "follow: a check still fails with Rust $theirs: nothing was committed, the mending stays as it is" >&2
+    else
+      git checkout -q -- rust-toolchain.toml
+      echo "follow: a check failed with Rust $theirs: nothing was changed. To mend the code for it:" >&2
+      echo "  bash tools/rust/follow.sh --mend    (writes Rust $theirs; then mend, and --apply commits both)" >&2
+    fi
     return 1
   fi
-  git add rust-toolchain.toml &&
+  if [ -n "$mending" ]; then git add -A; else git add rust-toolchain.toml; fi &&
     git commit -q -m "chore: follow Rust $theirs of GitHub's runners" &&
     echo "followed: $(git log -1 --format='%h %s')"
 }
 
 main() {
   cd "$(git rev-parse --show-toplevel)" || exit 2
-  local ours theirs
-  ours=$(pinned_rust < rust-toolchain.toml)
+  local ours written theirs
+  # The Rust committed is the one a push sends; the working tree's is the newer one already
+  # while the code is being mended for it.
+  ours=$(git show HEAD:rust-toolchain.toml 2> /dev/null | pinned_rust)
+  written=$(pinned_rust < rust-toolchain.toml)
   if [ -z "$ours" ]; then
     echo "follow: rust-toolchain.toml pins no version: nothing to follow" >&2
     exit 0
@@ -106,12 +129,23 @@ main() {
     exit 0
   fi
   echo "Rust $ours is behind GitHub's runners, which carry $theirs"
-  if [ "${1-}" != "--apply" ]; then
-    echo "follow it: bash tools/rust/follow.sh --apply"
-    exit 10
-  fi
-  follow "$theirs"
-  exit $?
+  case "${1-}" in
+    --apply)
+      follow "$theirs" "$written"
+      exit $?
+      ;;
+    --mend)
+      write_rust "$theirs" || exit 2
+      echo "Rust $theirs is written, not committed: mend what the checks tell (sh tools/checks.sh),"
+      echo "then bash tools/rust/follow.sh --apply commits the mending with it."
+      echo "To give it up: git checkout -- rust-toolchain.toml"
+      exit 0
+      ;;
+    *)
+      echo "follow it: bash tools/rust/follow.sh --apply"
+      exit 10
+      ;;
+  esac
 }
 
 # Sourced, only the parts are taken (the tests).

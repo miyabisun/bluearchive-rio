@@ -90,6 +90,22 @@ is "followed: the other lines stay" "$(grep -c 'profile = "minimal"' "$scratch/r
 is "followed: the watch is content" "$(run 1.100.0 true)" 0
 is "followed: nothing more to follow" "$(run 1.100.0 false --apply) $(commits)" "0 2"
 
+# The newer Rust asks for the code to be mended (a check fails until it is), and the mending
+# builds with the newer Rust alone: --mend writes that Rust for the mending, and --apply then
+# commits the mending and the Rust as one.
+git -C "$scratch" reset -q --hard HEAD~1
+is "back before the following" "$(pinned) $(commits)" "1.96.0 1"
+is "--mend writes the newer Rust and commits nothing" "$(run 1.100.0 false --mend) $(pinned) $(commits)" "0 1.100.0 1"
+is "mending: what is committed is still behind" "$(run 1.100.0 true)" 10
+echo mended > "$scratch/code.txt"
+is "mending: a check that still fails ends with 1" "$(run 1.100.0 false --apply)" 1
+is "mending: and leaves the mending as it is" "$(pinned) $(commits) $(cat "$scratch/code.txt")" "1.100.0 1 mended"
+is "mended: the following ends with 0" "$(run 1.100.0 'test -f code.txt' --apply)" 0
+is "mended: the Rust, the commits, a clean tree" "$(pinned) $(commits) $(changes)" "1.100.0 2 "
+is "mended: one commit holds the mending and the Rust" \
+  "$(git -C "$scratch" show --name-only --format= HEAD | sort | paste -s -d ' ')" "code.txt rust-toolchain.toml"
+is "mended: the commit says what it follows" "$(subject)" "chore: follow Rust 1.100.0 of GitHub's runners"
+
 rm -rf "$scratch" "$scratch.said"
 [ $failed = 0 ] && echo "follow.test.sh: ok"
 exit $failed

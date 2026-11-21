@@ -347,6 +347,7 @@ Rust の版は固定したままにしません。GitHub Actions の実行環境
 | --- | --- | --- |
 | 見張る | `bash tools/rust/follow.sh` | このリポジトリの版と、GitHub の実行環境の版を表示する。遅れていれば終了コード 10 |
 | 追従する | `bash tools/rust/follow.sh --apply` | `rust-toolchain.toml` を新しい版に書き換え、検査をすべて通してからコミットする。検査が落ちたら何も変えない |
+| 直してから追従する | `bash tools/rust/follow.sh --mend` | 新しい版を書き込むだけで、コミットしない。新しい版の検査（clippy の新しい指摘など）に合わせてコードを直した後で `--apply` すると、直しと版を 1 つのコミットにする |
 
 - push の前の門（`.githooks/pre-push`）が毎回見張ります。遅れていると、その場で追従のコミットを作って push を止めます。
   もう一度 push すると、追従のコミットも一緒に送られます。
