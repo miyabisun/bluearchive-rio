@@ -61,8 +61,9 @@ impl Rio {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // Every student by name, to stand in a row in that order.
-        let all = search::found(&self.roster, "", &Filter::default());
+        // Every student, the strikers before the specials and by name within each, to stand
+        // in a row in that order.
+        let all = tier::by_squad(search::found(&self.roster, "", &Filter::default()));
         let nobody = self.shown.tiers.is_empty();
         let rows = Row::ALL.into_iter().enumerate().map(|(at, one)| {
             let students: Vec<&Student> = (all.iter().copied())
@@ -130,7 +131,7 @@ impl Rio {
     }
 
     /// A row of the table, the `at`th from its top: its plate (a tier's letter on the
-    /// tier's colour, NG on the colour of danger), then its students by name. What is
+    /// tier's colour, NG on the colour of danger), then its students as given (`tier::by_squad`). What is
     /// dropped on it comes into the row, and stays in the other kind of row it stands in.
     fn table_row(
         &self,

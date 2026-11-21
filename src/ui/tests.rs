@@ -1319,6 +1319,29 @@ fn a_row_of_the_table_is_as_tall_empty_as_with_a_student(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn a_rows_strikers_stand_before_its_specials_each_by_name(cx: &mut TestAppContext) {
+    let (_, core, vcx) = tiers(cx);
+    // By name アイリ (a special) comes before トキ and ミカ (strikers): in a row she stands
+    // after them, and トキ before ミカ.
+    set(&core, vcx, |snapshot| {
+        snapshot.tiers = vec![(MIKA, Tier::S), (TOKI, Tier::S), (AIRI, Tier::S)];
+        snapshot.barred = vec![AIRI, MIKA];
+    });
+    let left = |vcx: &mut VisualTestContext, tile: String| {
+        let tile = bounds(vcx, &tile).unwrap_or_else(|| panic!("{tile} is not in the row"));
+        tile.left()
+    };
+    let (toki, mika, airi) = (
+        left(vcx, format!("tiered:{TOKI}")),
+        left(vcx, format!("tiered:{MIKA}")),
+        left(vcx, format!("tiered:{AIRI}")),
+    );
+    assert!(toki < mika && mika < airi, "トキ, ミカ, then アイリ");
+    // The row of those barred the same.
+    assert!(left(vcx, format!("barred:{MIKA}")) < left(vcx, format!("barred:{AIRI}")));
+}
+
+#[gpui::test]
 fn the_window_has_three_tabs_and_the_third_has_its_sub_tabs(cx: &mut TestAppContext) {
     let (_, _, vcx) = open(cx);
     assert!(has(vcx, "tab:対戦") && has(vcx, "tab:履歴") && has(vcx, "tab:編成登録"));

@@ -3,7 +3,7 @@
 //! The table's last row holds the students the user keeps out of their attacks (編成NG):
 //! whether a student is barred says nothing of her tier, and she may stand in both rows.
 
-use crate::Student;
+use crate::{Squad, Student};
 
 /// A tier, the highest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -134,10 +134,44 @@ pub fn by_tier<'a>(mut students: Vec<&'a Student>, tiers: &[(i64, Tier)]) -> Vec
     students
 }
 
+/// The students as they stand in a row of the table: the strikers before the specials (the
+/// user, 2026-11-21: by squad, then by name); within a squad in the order given.
+pub fn by_squad(mut students: Vec<&Student>) -> Vec<&Student> {
+    // Stable: the strikers' key is the lower.
+    students.sort_by_key(|student| student.squad == Squad::Support);
+    students
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Change, Row, Sorted, Tier, by_tier, dropped, of};
+    use super::{Change, Row, Sorted, Tier, by_squad, by_tier, dropped, of};
     use crate::{Armor, Attack, Role, Squad, Student};
+
+    #[test]
+    fn the_strikers_come_before_the_specials_and_the_order_given_stays_within() {
+        let student = |(id, squad): (i64, Squad)| Student {
+            id,
+            name: format!("生徒{id}"),
+            squad,
+            role: Role::Tanker,
+            attack: Attack::Pierce,
+            armor: Armor::HeavyArmor,
+            reading: None,
+        };
+        let ids = |found: Vec<&Student>| -> Vec<i64> { found.iter().map(|one| one.id).collect() };
+        let (striker, special) = (Squad::Main, Squad::Support);
+        let mixed = [(1, special), (2, striker), (3, special), (4, striker)];
+        let students: Vec<Student> = mixed.map(student).into();
+        assert_eq!(
+            ids(by_squad(students.iter().collect())),
+            [2, 4, 1, 3],
+            "the strikers as given, then the specials as given"
+        );
+        // One squad alone: as given.
+        let students: Vec<Student> = [(3, special), (1, special)].map(student).into();
+        assert_eq!(ids(by_squad(students.iter().collect())), [3, 1]);
+        assert!(by_squad(Vec::new()).is_empty());
+    }
 
     #[test]
     fn the_tiers_are_five_from_s_to_d() {
