@@ -59,7 +59,7 @@ actions!(rio, [FocusNext, FocusPrev, Escape]);
 /// (the tiers', with nobody in a tier), all that stands over the students and three rows of
 /// the students.
 const WINDOW: (f32, f32) = (720., 820.);
-const WINDOW_LEAST: (f32, f32) = (420. + compose::BUTTON_ROOM, 476.);
+const WINDOW_LEAST: (f32, f32) = (420. + compose::BUTTON_ROOM, 576.);
 /// How long the window's place has to stay put before it is kept: a drag moves it many times
 /// a second.
 const PLACE_SETTLES: Duration = Duration::from_millis(500);

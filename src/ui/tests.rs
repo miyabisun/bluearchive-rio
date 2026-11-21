@@ -1015,7 +1015,8 @@ fn the_least_window_shows_the_teams_the_search_and_three_rows_of_students(cx: &m
     // (The tiers' tab takes more over its students and decides how low the window is made:
     // here a little more than three rows show.)
     let rows = (students.bottom() - first.top()) / (first.size.height + px(4.));
-    assert!((3. ..4.).contains(&rows), "{rows} rows of students show");
+    // The tiers' tab asks for the taller window: here more than three rows show.
+    assert!(rows >= 3., "{rows} rows of students show");
     assert!(students.bottom() <= px(tall));
 }
 
@@ -1191,6 +1192,12 @@ fn the_least_window_shows_the_tiers_the_search_and_three_rows_of_students(cx: &m
             "{part} is cut: {found:?}"
         );
     }
+    // All five rows are in sight, none left to scroll to.
+    let (table, last) = (
+        bounds(vcx, "tiers").expect("the tiers"),
+        bounds(vcx, "tier:D").expect("the last tier"),
+    );
+    assert!(last.bottom() <= table.bottom(), "the last tier is cut");
     // Three rows of students show whole.
     let (students, first) = (
         bounds(vcx, "students").expect("the list"),
@@ -1199,4 +1206,20 @@ fn the_least_window_shows_the_tiers_the_search_and_three_rows_of_students(cx: &m
     let rows = (students.bottom() - first.top()) / (first.size.height + px(4.));
     assert!((3. ..3.5).contains(&rows), "{rows} rows of students show");
     assert!(students.bottom() <= px(tall));
+}
+
+#[gpui::test]
+fn a_tiers_row_is_as_tall_empty_as_with_a_student(cx: &mut TestAppContext) {
+    let (_, _, vcx) = tiers(cx);
+    let tall = |vcx: &mut VisualTestContext| {
+        let row = bounds(vcx, "tier:A").expect("the row");
+        row.size.height
+    };
+    // A row has a student's room from the start: nothing moves as one comes into it.
+    let (empty, list) = (tall(vcx), bounds(vcx, "students").expect("the list").top());
+    drag(vcx, &format!("tile:{AIRI_BAND}"), "tier:A");
+    assert!(within(vcx, &format!("tiered:{AIRI_BAND}"), "tier:A"));
+    assert_eq!(tall(vcx), empty, "the row keeps its height");
+    let now = bounds(vcx, "students").expect("the list").top();
+    assert_eq!(now, list, "and the list its place");
 }

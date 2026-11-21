@@ -24,8 +24,10 @@ use crate::{
 /// The sides of a student's icon in a tier's row: smaller than in the list, a tier holds
 /// many.
 const TIERED: Pixels = px(44.);
-/// How tall a tier's row is while nobody is in it, and how wide its letter's plate.
-const EMPTY: Pixels = px(24.);
+/// How tall a tier's row is at the least: a student's icon and the row's own edges, whether
+/// anybody is in it or not, so that nothing moves as the first student comes into it. And
+/// how wide its letter's plate.
+const ROW: Pixels = px(44. + 5.);
 const PLATE: Pixels = px(28.);
 /// How much of the window's height the tiers take at most before they scroll by themselves:
 /// the students to sort keep their room.
@@ -141,7 +143,7 @@ impl Rio {
             .flex_none()
             .gap(SP_2)
             .py(px(2.))
-            .min_h(EMPTY + px(5.))
+            .min_h(ROW)
             .border_b_1()
             .border_color(theme.border)
             .child(
@@ -151,7 +153,6 @@ impl Rio {
                     .items_center()
                     .justify_center()
                     .w(PLATE)
-                    .min_h(EMPTY)
                     .rounded(RADIUS_SM)
                     .bg(theme::tier_colour(tier))
                     .text_size(FS_SM)
