@@ -866,10 +866,14 @@ fn the_students_are_narrowed_by_the_name_and_the_buttons(cx: &mut TestAppContext
     click(vcx, "filter:タンク");
     assert!(has(vcx, "pressed:タンク"), "the button stays pressed");
     assert_eq!(shown(vcx, &hoshinos), [true, false, true, false, false]);
-    // Another class as well: either.
+    // Another class takes its place: one of a kind is pressed at a time.
     click(vcx, "filter:サポーター");
-    assert_eq!(shown(vcx, &hoshinos), [true, true, true, false, false]);
-    // An attack type: with the classes, both have to fit.
+    assert!(has(vcx, "pressed:サポーター") && has(vcx, "filter:タンク"));
+    assert!(!has(vcx, "pressed:タンク"), "the tanks' button is let up");
+    assert_eq!(shown(vcx, &hoshinos), [false, true, false, false, false]);
+    click(vcx, "filter:タンク");
+    assert_eq!(shown(vcx, &hoshinos), [true, false, true, false, false]);
+    // An attack type: with the class, both have to fit.
     click(vcx, "filter:神秘");
     assert_eq!(shown(vcx, &hoshinos), [false, false, true, false, false]);
     // An armor type none of them has: nobody, and the window says so.
@@ -877,7 +881,7 @@ fn the_students_are_narrowed_by_the_name_and_the_buttons(cx: &mut TestAppContext
     assert_eq!(shown(vcx, &hoshinos), [false; 5]);
     assert!(shows(vcx, "当てはまる生徒がいません。"));
     // Pressed again, the buttons are let up; the name cleared, everybody is back.
-    for pressed in ["弾力装甲", "神秘", "サポーター", "タンク"] {
+    for pressed in ["弾力装甲", "神秘", "タンク"] {
         click(vcx, &format!("pressed:{pressed}"));
     }
     assert!(has(vcx, "filter:タンク") && !has(vcx, "pressed:タンク"));
@@ -1115,10 +1119,10 @@ fn the_squads_buttons_narrow_the_tier_tabs_students_only(cx: &mut TestAppContext
     click(vcx, "filter:ストライカー");
     assert!(has(vcx, "pressed:ストライカー"));
     assert_eq!(shown(vcx), (false, true), "the strikers alone");
-    // Both squads pressed: either fits, as within any kind.
+    // The other squad takes its place: the strikers' button is let up.
     click(vcx, "filter:スペシャル");
-    assert_eq!(shown(vcx), (true, true));
-    click(vcx, "pressed:ストライカー");
+    assert!(has(vcx, "pressed:スペシャル") && has(vcx, "filter:ストライカー"));
+    assert!(!has(vcx, "pressed:ストライカー"));
     assert_eq!(shown(vcx), (true, false), "the specials alone");
     // Another kind as well: both have to fit (アイリ is a supporter, no tank).
     click(vcx, "filter:タンク");

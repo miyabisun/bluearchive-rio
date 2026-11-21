@@ -18,8 +18,8 @@ pub fn fold(text: &str) -> String {
     folded.collect::<String>().to_lowercase()
 }
 
-/// What narrows the students down, by what the user pressed: within one kind any of those
-/// pressed fits, and each kind with something pressed has to fit.
+/// What narrows the students down, by what the user pressed: one of each kind at most
+/// (`toggle`), and each kind with something pressed has to fit.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Filter {
     /// The squads: the strikers, the specials.
@@ -29,11 +29,13 @@ pub struct Filter {
     pub armors: Vec<Armor>,
 }
 
-/// Presses `one` in a kind's list, or lets it up again.
+/// Presses `one` in a kind's list, the one pressed before let up (one of a kind is pressed
+/// at a time); pressed again, `one` is let up and its kind asks for nothing.
 pub fn toggle<T: PartialEq>(pressed: &mut Vec<T>, one: T) {
-    match pressed.iter().position(|other| *other == one) {
-        Some(at) => drop(pressed.remove(at)),
-        None => pressed.push(one),
+    let was = pressed.contains(&one);
+    pressed.clear();
+    if !was {
+        pressed.push(one);
     }
 }
 
@@ -160,32 +162,36 @@ mod tests {
         toggle(&mut filter.squads, Squad::Support);
         assert_eq!(ids(found(&students, "", &filter)), [6]);
         assert!(found(&students, "ほしの", &filter).is_empty());
-        // Both pressed: either fits.
+        // The other squad pressed takes its place.
         toggle(&mut filter.squads, Squad::Main);
-        assert_eq!(ids(found(&students, "あ", &filter)), [6, 3]);
+        assert_eq!(filter, strikers());
+        assert_eq!(ids(found(&students, "あ", &filter)), [3]);
     }
 
     #[test]
-    fn a_filter_takes_any_of_one_kind_and_every_kind() {
+    fn a_filter_takes_one_of_a_kind_and_every_kind() {
         let students = students();
         let mut filter = strikers();
         toggle(&mut filter.attacks, Attack::Pierce);
         assert_eq!(ids(found(&students, "", &filter)), [4, 1]);
-        // Another of the same kind: either fits.
+        // Another of the same kind takes its place: one of a kind is pressed at a time.
         toggle(&mut filter.attacks, Attack::Explosion);
-        assert_eq!(ids(found(&students, "", &filter)), [3, 4, 5, 1, 2]);
+        assert_eq!(filter.attacks, [Attack::Explosion]);
+        assert_eq!(ids(found(&students, "", &filter)), [3, 5, 2]);
         // Another kind: both have to fit.
         toggle(&mut filter.roles, Role::DamageDealer);
-        assert_eq!(ids(found(&students, "", &filter)), [3, 4, 2]);
+        assert_eq!(ids(found(&students, "", &filter)), [3, 2]);
         toggle(&mut filter.armors, Armor::ElasticArmor);
-        assert_eq!(ids(found(&students, "", &filter)), [4]);
+        assert!(found(&students, "", &filter).is_empty());
+        toggle(&mut filter.armors, Armor::LightArmor);
+        assert_eq!(ids(found(&students, "", &filter)), [3, 2]);
         // With the name as well.
-        assert!(found(&students, "ほしの", &filter).is_empty());
-        // Pressed again, a button is let up.
-        toggle(&mut filter.armors, Armor::ElasticArmor);
+        assert_eq!(ids(found(&students, "ほしの", &filter)), [2]);
+        // Pressed again, a button is let up, and its kind asks for nothing.
+        toggle(&mut filter.armors, Armor::LightArmor);
         toggle(&mut filter.roles, Role::DamageDealer);
         toggle(&mut filter.attacks, Attack::Explosion);
-        assert_eq!(filter.attacks, [Attack::Pierce]);
-        assert_eq!(ids(found(&students, "ほしの", &filter)), [1]);
+        assert_eq!(filter, strikers());
+        assert_eq!(ids(found(&students, "ほしの", &filter)), [1, 2]);
     }
 }
