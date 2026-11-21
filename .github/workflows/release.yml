@@ -30,7 +30,7 @@ jobs:
     env:
       ASSET: bluearchive-rio-x86_64-pc-windows-msvc.exe
       # Whether this run publishes what it builds.
-      PUBLISH: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'release: v') }}
+      PUBLISH: "${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'release: v') }}"
     steps:
       - name: Check out repository
         uses: actions/checkout@v7

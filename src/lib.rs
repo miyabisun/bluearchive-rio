@@ -217,6 +217,18 @@ mod tests {
     }
 
     #[test]
+    fn the_workflows_are_read_as_yaml() {
+        // GitHub refuses a workflow it cannot read, and tells so only after the push.
+        let folder = concat!(env!("CARGO_MANIFEST_DIR"), "/.github/workflows");
+        for entry in std::fs::read_dir(folder).expect("the workflows' folder") {
+            let path = entry.expect("a file").path();
+            let text = std::fs::read_to_string(&path).expect("a workflow");
+            let read = serde_yaml::from_str::<serde_yaml::Value>(&text);
+            assert!(read.is_ok(), "{}: {:?}", path.display(), read.err());
+        }
+    }
+
+    #[test]
     fn every_class_and_type_has_its_mark() {
         for role in Role::ALL {
             assert!(mark(role.mark()).is_some(), "{} has no icon", role.name());
