@@ -1,4 +1,4 @@
-//! What the tabs that work with the students share (編成追加, 編成Tier): the row that finds
+//! What the sub-tabs that work with the students share (追加, Tier表): the row that finds
 //! them (a name typed, buttons of their attributes), their icons in a list, and what a drag
 //! of one carries.
 
@@ -10,7 +10,7 @@ use gpui::{
 };
 
 use super::{
-    Rio, Tab, icons,
+    Rio, Sub, icons,
     text_input::{self, TextInput},
     theme::{self, FS_SM, RADIUS_SM, SP_2, Theme},
     widgets::{self, Mark},
@@ -19,7 +19,7 @@ use crate::{
     ARMOR_MARK, ATTACK_MARK, Armor, Attack, Role as Class, Squad, Student,
     draft::takes,
     search::{self, Filter},
-    tier::Tier,
+    tier::Row,
 };
 
 /// The sides of a student's icon in a list.
@@ -27,9 +27,9 @@ pub(super) const TILE: Pixels = px(56.);
 /// The least the search field is wide.
 const FIELD: Pixels = px(160.);
 
-/// What finds students in a tab: the name typed, the buttons pressed, and where the students
-/// found are scrolled to. Each tab has its own: what narrows one's list is not seen in the
-/// other.
+/// What finds students in a sub-tab: the name typed, the buttons pressed, and where the
+/// students found are scrolled to. Each has its own: what narrows one's list is not seen in
+/// the other.
 pub(super) struct Finder {
     pub(super) query: Entity<TextInput>,
     pub(super) filter: Filter,
@@ -80,34 +80,34 @@ impl Render for Ghost {
 }
 
 impl Rio {
-    /// What finds the students in a tab: the tier tab's own, the other for the teams put
+    /// What finds the students in a sub-tab: the table's own, the other for the teams put
     /// together.
-    pub(super) fn finder(&self, tab: Tab) -> &Finder {
-        match tab {
-            Tab::Tiers => &self.ranking,
+    pub(super) fn finder(&self, sub: Sub) -> &Finder {
+        match sub {
+            Sub::Tiers => &self.ranking,
             _ => &self.picking,
         }
     }
 
-    fn finder_mut(&mut self, tab: Tab) -> &mut Finder {
-        match tab {
-            Tab::Tiers => &mut self.ranking,
+    fn finder_mut(&mut self, sub: Sub) -> &mut Finder {
+        match sub {
+            Sub::Tiers => &mut self.ranking,
             _ => &mut self.picking,
         }
     }
 
-    /// The row that finds students in `tab`: the field for a name, then the buttons that
-    /// narrow them down, a kind beside the other: the squads (where `squads`: a tab whose
-    /// list is of one squad already has none), the classes, the attack and the armor types.
+    /// The row that finds students in `sub`: the field for a name, then the buttons that
+    /// narrow them down, a kind beside the other: the squads (where `squads`: a list of one
+    /// squad already has none), the classes, the attack and the armor types.
     pub(super) fn finding(
         &self,
         theme: &Theme,
-        tab: Tab,
+        sub: Sub,
         squads: bool,
         window: &Window,
         cx: &Context<Self>,
     ) -> Div {
-        let finder = self.finder(tab);
+        let finder = self.finder(sub);
         let focused = finder.query.focus_handle(cx).is_focused(window);
         let field = div()
             .id("search")
@@ -135,7 +135,7 @@ impl Rio {
             let (pressed, colour) = (filter.squads.contains(&one), rgb(colour).into());
             widgets::mark_button(theme, name, Mark::Letters(letters), colour, pressed).on_click(
                 cx.listener(move |this, _, _, cx| {
-                    search::toggle(&mut this.finder_mut(tab).filter.squads, one);
+                    search::toggle(&mut this.finder_mut(sub).filter.squads, one);
                     cx.notify();
                 }),
             )
@@ -145,7 +145,7 @@ impl Rio {
             let pressed = filter.roles.contains(&one);
             widgets::mark_button(theme, one.name(), Mark::Icon(one.mark()), class, pressed)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    search::toggle(&mut this.finder_mut(tab).filter.roles, one);
+                    search::toggle(&mut this.finder_mut(sub).filter.roles, one);
                     cx.notify();
                 }))
         });
@@ -153,7 +153,7 @@ impl Rio {
             let (pressed, colour) = (filter.attacks.contains(&one), theme::attack_colour(one));
             widgets::mark_button(theme, one.name(), Mark::Icon(ATTACK_MARK), colour, pressed)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    search::toggle(&mut this.finder_mut(tab).filter.attacks, one);
+                    search::toggle(&mut this.finder_mut(sub).filter.attacks, one);
                     cx.notify();
                 }))
         });
@@ -161,7 +161,7 @@ impl Rio {
             let (pressed, colour) = (filter.armors.contains(&one), theme::armor_colour(one));
             widgets::mark_button(theme, one.name(), Mark::Icon(ARMOR_MARK), colour, pressed)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    search::toggle(&mut this.finder_mut(tab).filter.armors, one);
+                    search::toggle(&mut this.finder_mut(sub).filter.armors, one);
                     cx.notify();
                 }))
         });
@@ -181,14 +181,14 @@ impl Rio {
 
     /// A student's icon, `size` square, to pick or to drag: in a frame of `frame`, over the
     /// attack type's colour at the upper left and the armor type's at the lower right. The
-    /// name, the attributes and the tier (where the student has one) are on a hover. The
-    /// tests find it as `<kind>:<id>`.
+    /// name, the attributes and the `row` of the table the student stands in (a tier, or
+    /// 編成NG) are on a hover. The tests find it as `<kind>:<id>`.
     pub(super) fn tile(
         student: &Student,
         kind: &'static str,
         size: Pixels,
         frame: Hsla,
-        tier: Option<Tier>,
+        row: Option<Row>,
     ) -> Stateful<Div> {
         let (id, squad) = (student.id, student.squad);
         // The two colours meet along the line from the upper right to the lower left, run
@@ -205,8 +205,10 @@ impl Rio {
             student.attack.name(),
             student.armor.name()
         );
-        if let Some(tier) = tier {
-            told.push_str(&format!("\nTier {}", tier.name()));
+        match row {
+            Some(Row::Tier(tier)) => told.push_str(&format!("\nTier {}", tier.name())),
+            Some(Row::Barred) => told.push_str("\n編成NG"),
+            None => {}
         }
         div()
             .id(SharedString::from(format!("{kind}-{id}")))

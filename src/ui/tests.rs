@@ -12,14 +12,15 @@ use gpui::{
     Pixels, TestAppContext, VisualTestContext, px, size,
 };
 
-use super::{Rio, Tab, Updates, theme::Theme};
+use super::{Rio, Tab, Updates, text_input::TextInput, theme::Theme};
 use crate::{
     Squad,
     app::{Core, Places, Snapshot, UpdateCheck},
     draft::Draft,
     opponent::Front,
     settings::{Settings, ThemeChoice},
-    store::{Counsel, Fought, Ground, Kept, Likely, Player, Store, Tried},
+    source::{Reported, Source},
+    store::{Counsel, Fought, Ground, Kept, Likely, Player, Registered, Store, Tried},
     tier::Tier,
     watch::{Choice, Opponent, Screen, Status},
 };
@@ -140,6 +141,7 @@ fn opponent() -> Opponent {
         wins,
         battles,
         registered: false,
+        reported: None,
     };
     let own = Likely {
         rest: BEHIND[0],
@@ -171,9 +173,8 @@ fn opponent() -> Opponent {
     }
 }
 
-/// ミカ and トキ, the third strikers of the two attacks.
+/// ミカ, the third striker of the first attack (トキ stands there in the second).
 const MIKA: i64 = 10059;
-const TOKI: i64 = 10062;
 
 /// What the user chose of `opponent`: a defense, and an attack against it or none.
 fn choice(rest: [i64; 3], attack: Option<[i64; 6]>) -> Option<Choice> {
@@ -673,41 +674,6 @@ fn the_menu_closes_without_barring(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_barred_tab_lists_the_students_barred_to_let_them_back_in(cx: &mut TestAppContext) {
-    let (_, core, vcx) = open(cx);
-    click(vcx, "tab:編成NG");
-    assert!(
-        shows(
-            vcx,
-            "攻撃の候補の生徒を右クリックすると、編成NGにできます。"
-        ),
-        "with nobody barred, how to"
-    );
-    // Barred before this start: the reading reports whom the records keep.
-    let records = Store::open(&core.places.database).unwrap();
-    records.bar(TOKI, true).unwrap();
-    records.bar(MIKA, true).unwrap();
-    set(&core, vcx, |snapshot| {
-        snapshot.barred = records.barred().unwrap();
-        snapshot.opponent = Some(opponent());
-    });
-    // No candidate need show them: the tab always does, by name.
-    assert!(has(vcx, "barred:10062") && shows(vcx, "トキ"));
-    assert!(has(vcx, "barred:10059") && shows(vcx, "ミカ"));
-    // The button of a row lets its student back in.
-    click(vcx, "unbar-10059");
-    assert!(!has(vcx, "barred:10059") && has(vcx, "barred:10062"));
-    assert_eq!(kept_barred(&core), [TOKI]);
-    // So does the student's menu, as on a candidate.
-    right_click(vcx, "barred:10062");
-    click(vcx, "menu:編成NGを外す");
-    assert!(!has(vcx, "barred:10062"));
-    assert!(kept_barred(&core).is_empty());
-    click(vcx, "tab:対戦");
-    assert!(has(vcx, "candidate:attack-0-1") && !has(vcx, "excluded:attack-0-1"));
-}
-
-#[gpui::test]
 fn a_student_who_cannot_be_barred_says_why(cx: &mut TestAppContext) {
     let (_, core, vcx) = open(cx);
     set(&core, vcx, |snapshot| snapshot.opponent = Some(opponent()));
@@ -739,10 +705,11 @@ fn the_menu_goes_as_another_page_opens(cx: &mut TestAppContext) {
     assert!(!has(vcx, "student-menu"), "and does not come back");
 }
 
-/// The window with the tab open the formations are put together in (編成追加).
+/// The window with the sub-tab open the formations are put together in (編成登録の「追加」,
+/// the one the tab opens with).
 fn compose(cx: &mut TestAppContext) -> (Entity<Rio>, Arc<Core>, &mut VisualTestContext) {
     let (rio, core, vcx) = open(cx);
-    click(vcx, "tab:編成追加");
+    click(vcx, "tab:編成登録");
     (rio, core, vcx)
 }
 
@@ -777,12 +744,39 @@ fn drag(vcx: &mut VisualTestContext, from: &str, to: &str) {
 
 /// Types into the search field as the IME would, the text settled.
 fn search(rio: &Entity<Rio>, vcx: &mut VisualTestContext, typed: &str) {
-    let field = rio.read_with(vcx, |rio, _| rio.finder(rio.tab).query.clone());
+    let field = rio.read_with(vcx, |rio, _| rio.finder(rio.sub).query.clone());
+    type_into(vcx, &field, typed);
+}
+
+/// Types into a field in place of what it holds, as the IME would, the text settled.
+fn type_into(vcx: &mut VisualTestContext, field: &Entity<TextInput>, typed: &str) {
     field.update_in(vcx, |field, window, cx| {
         let all = 0..field.text().encode_utf16().count();
         field.replace_text_in_range(Some(all), typed, window, cx);
     });
     vcx.run_until_parked();
+}
+
+/// Types what a formation was told with: the battles and the wins of its record, the page.
+fn tell(rio: &Entity<Rio>, vcx: &mut VisualTestContext, [battles, wins, url]: [&str; 3]) {
+    let fields = rio.read_with(vcx, |rio, _| {
+        let told = &rio.told;
+        [told.battles.clone(), told.wins.clone(), told.url.clone()]
+    });
+    for (field, typed) in fields.iter().zip([battles, wins, url]) {
+        type_into(vcx, field, typed);
+    }
+}
+
+/// What the fields of what a formation was told with hold.
+fn told(rio: &Entity<Rio>, vcx: &mut VisualTestContext) -> [String; 3] {
+    rio.read_with(vcx, |rio, cx| rio.told.typed(cx))
+}
+
+/// The formations registered, as the records keep them: the one registered last first.
+fn kept_registered(core: &Core) -> Vec<Registered> {
+    let records = Store::open(&core.places.database).unwrap();
+    records.registered().unwrap()
 }
 
 /// アイリ, the first student by name and a special; アイリ（バンド）, the first striker.
@@ -806,12 +800,24 @@ fn the_compose_tab_starts_with_the_attacks_first_striker_chosen(cx: &mut TestApp
     );
     let register = bounds(vcx, "register").expect("the button");
     assert!(place(vcx, 5).right() < register.left() && last.right() < register.left());
+    assert!(
+        shows(vcx, "編成登録") && !has(vcx, "cancel"),
+        "a new formation"
+    );
+    // Under them what the formation was told with: the record, then the page.
+    let (battles, wins, page) = (
+        bounds(vcx, "told-battles").expect("the battles' field"),
+        bounds(vcx, "told-wins").expect("the wins' field"),
+        bounds(vcx, "told-url").expect("the page's field"),
+    );
+    assert!(last.bottom() < battles.top());
+    assert!(battles.right() < wins.left() && wins.right() < page.left());
     // Under them the search and the students, by name.
     let (field, students) = (
         bounds(vcx, "search").expect("the search field"),
         bounds(vcx, "students").expect("the list"),
     );
-    assert!(last.bottom() < field.top() && field.bottom() <= students.top());
+    assert!(battles.bottom() < field.top() && field.bottom() <= students.top());
     let (band, aoba) = (
         bounds(vcx, "tile:16015").expect("アイリ（バンド）"),
         bounds(vcx, "tile:16017").expect("アオバ"),
@@ -991,6 +997,11 @@ fn a_formation_is_registered_once_it_is_whole_and_shows_against_its_front(cx: &m
         vcx,
         "同じ D1 とスペシャルの防衛は、まだ登録がありません。"
     ));
+    // A slip of the hand: the toast puts it back, and it is counselled again.
+    assert!(shows(vcx, "削除しました"));
+    click(vcx, "undo");
+    assert_eq!(registered(&core).len(), 1);
+    assert!(has(vcx, "registered:attack-0-0") && !has(vcx, "undo"));
 }
 
 #[gpui::test]
@@ -999,8 +1010,11 @@ fn the_least_window_shows_the_teams_the_search_and_three_rows_of_students(cx: &m
     let (wide, tall) = super::WINDOW_LEAST;
     vcx.simulate_resize(size(px(wide), px(tall)));
     vcx.run_until_parked();
-    // The button beside the teams, the search and every button of it are within the width.
+    // The sub-tabs, the button beside the teams, the fields, the search and every button of
+    // it are within the width.
     let mut parts = vec!["place:5", "place:11", "register", "search"];
+    parts.extend(["sub:追加", "sub:Tier表", "sub:編集"]);
+    parts.extend(["told-battles", "told-wins", "told-url"]);
     parts.extend(["filter:タンク", "filter:TS", "filter:爆発", "filter:振動"]);
     parts.extend(["filter:軽装備", "filter:弾力装甲"]);
     for part in parts {
@@ -1016,18 +1030,18 @@ fn the_least_window_shows_the_teams_the_search_and_three_rows_of_students(cx: &m
         bounds(vcx, "students").expect("the list"),
         bounds(vcx, &format!("tile:{AIRI_BAND}")).expect("the first student"),
     );
-    // (The tiers' tab takes more over its students and decides how low the window is made:
-    // here a little more than three rows show.)
+    // The table of tiers takes more over its students and decides how low the window is
+    // made: here more than three rows show.
     let rows = (students.bottom() - first.top()) / (first.size.height + px(4.));
-    // The tiers' tab asks for the taller window: here more than three rows show.
     assert!(rows >= 3., "{rows} rows of students show");
     assert!(students.bottom() <= px(tall));
 }
 
-/// The window with the tab open the students are sorted into tiers in (編成Tier).
+/// The window with the sub-tab open the students are sorted in (編成登録の「Tier表」).
 fn tiers(cx: &mut TestAppContext) -> (Entity<Rio>, Arc<Core>, &mut VisualTestContext) {
     let (rio, core, vcx) = open(cx);
-    click(vcx, "tab:編成Tier");
+    click(vcx, "tab:編成登録");
+    click(vcx, "sub:Tier表");
     (rio, core, vcx)
 }
 
@@ -1038,11 +1052,13 @@ fn kept_tiers(core: &Core) -> Vec<(i64, Tier)> {
 }
 
 #[gpui::test]
-fn the_tier_tab_has_the_five_tiers_over_the_students_of_both_squads(cx: &mut TestAppContext) {
+fn the_table_has_the_tiers_and_those_barred_over_the_students_of_both_squads(
+    cx: &mut TestAppContext,
+) {
     let (_, _, vcx) = tiers(cx);
-    // S to D from the top, each with its letter.
+    // S to D from the top, each with its letter, and under them those barred (NG).
     let mut top = px(0.);
-    for name in ["S", "A", "B", "C", "D"] {
+    for name in ["S", "A", "B", "C", "D", "NG"] {
         let row = bounds(vcx, &format!("tier:{name}")).unwrap_or_else(|| panic!("no tier {name}"));
         assert!(row.top() > top, "tier {name} stands under the one before");
         assert!(shows(vcx, name));
@@ -1127,9 +1143,9 @@ fn the_squads_buttons_narrow_the_tier_tabs_students_only(cx: &mut TestAppContext
     // Another kind as well: both have to fit (アイリ is a supporter, no tank).
     click(vcx, "filter:タンク");
     assert_eq!(shown(vcx), (false, false));
-    // The tab the teams are put together in has its own search: no squads' buttons (the
+    // The sub-tab the teams are put together in has its own search: no squads' buttons (the
     // place chosen tells the squad), and nothing pressed here narrows it.
-    click(vcx, "tab:編成追加");
+    click(vcx, "sub:追加");
     assert!(!has(vcx, "filter:ストライカー") && !has(vcx, "pressed:スペシャル"));
     assert!(has(vcx, "filter:タンク") && !has(vcx, "pressed:タンク"));
     assert_eq!(
@@ -1141,7 +1157,7 @@ fn the_squads_buttons_narrow_the_tier_tabs_students_only(cx: &mut TestAppContext
 
 #[gpui::test]
 fn the_teams_are_put_together_from_the_higher_tiers_first(cx: &mut TestAppContext) {
-    let (_, core, vcx) = compose(cx);
+    let (rio, core, vcx) = compose(cx);
     let left_of = |vcx: &mut VisualTestContext, students: &[i64]| -> bool {
         let lefts: Vec<_> = (students.iter())
             .map(|student| {
@@ -1172,6 +1188,19 @@ fn the_teams_are_put_together_from_the_higher_tiers_first(cx: &mut TestAppContex
         left_of(vcx, &[AIRI, 20019]),
         "アイリ, then アカネ（バニーガール）"
     );
+    // Those barred are still offered (a formation told of may hold them), after all the
+    // others: アカネ of a tier until she is barred, then after アカリ, who has none.
+    click(vcx, "place:0");
+    search(&rio, vcx, "あか");
+    assert!(
+        left_of(vcx, &[13000, 13002]),
+        "アカネ of a tier, then アカリ"
+    );
+    set(&core, vcx, |snapshot| {
+        snapshot.tiers.retain(|(student, _)| *student != 13000);
+        snapshot.barred = vec![13000];
+    });
+    assert!(left_of(vcx, &[13002, 13000]), "アカリ, then アカネ, barred");
 }
 
 #[gpui::test]
@@ -1180,8 +1209,15 @@ fn the_least_window_shows_the_tiers_the_search_and_three_rows_of_students(cx: &m
     let (wide, tall) = super::WINDOW_LEAST;
     vcx.simulate_resize(size(px(wide), px(tall)));
     vcx.run_until_parked();
-    // Every tier, the search and every button of it are in sight.
-    let mut parts = vec!["tier:S", "tier:D", "search", "filter:ストライカー"];
+    // The sub-tabs, every row of the table, the search and every button of it are in sight.
+    let mut parts = vec![
+        "tier:S",
+        "tier:D",
+        "tier:NG",
+        "search",
+        "filter:ストライカー",
+    ];
+    parts.extend(["sub:追加", "sub:Tier表", "sub:編集"]);
     parts.extend(["filter:スペシャル", "filter:タンク", "filter:TS"]);
     parts.extend([
         "filter:爆発",
@@ -1196,12 +1232,12 @@ fn the_least_window_shows_the_tiers_the_search_and_three_rows_of_students(cx: &m
             "{part} is cut: {found:?}"
         );
     }
-    // All five rows are in sight, none left to scroll to.
+    // All six rows are in sight, none left to scroll to.
     let (table, last) = (
-        bounds(vcx, "tiers").expect("the tiers"),
-        bounds(vcx, "tier:D").expect("the last tier"),
+        bounds(vcx, "tiers").expect("the table"),
+        bounds(vcx, "tier:NG").expect("the last row"),
     );
-    assert!(last.bottom() <= table.bottom(), "the last tier is cut");
+    assert!(last.bottom() <= table.bottom(), "the last row is cut");
     // Three rows of students show whole.
     let (students, first) = (
         bounds(vcx, "students").expect("the list"),
@@ -1213,17 +1249,483 @@ fn the_least_window_shows_the_tiers_the_search_and_three_rows_of_students(cx: &m
 }
 
 #[gpui::test]
-fn a_tiers_row_is_as_tall_empty_as_with_a_student(cx: &mut TestAppContext) {
+fn a_row_of_the_table_is_as_tall_empty_as_with_a_student(cx: &mut TestAppContext) {
     let (_, _, vcx) = tiers(cx);
-    let tall = |vcx: &mut VisualTestContext| {
-        let row = bounds(vcx, "tier:A").expect("the row");
+    let tall = |vcx: &mut VisualTestContext, row: &str| {
+        let row = bounds(vcx, row).expect("the row");
         row.size.height
     };
-    // A row has a student's room from the start: nothing moves as one comes into it.
-    let (empty, list) = (tall(vcx), bounds(vcx, "students").expect("the list").top());
+    // A row has a student's room from the start: nothing moves as one comes into it. The
+    // row of those barred as a tier's.
+    let list = bounds(vcx, "students").expect("the list").top();
+    let (empty, barred) = (tall(vcx, "tier:A"), tall(vcx, "tier:NG"));
+    assert_eq!(barred, empty, "every row as tall");
     drag(vcx, &format!("tile:{AIRI_BAND}"), "tier:A");
     assert!(within(vcx, &format!("tiered:{AIRI_BAND}"), "tier:A"));
-    assert_eq!(tall(vcx), empty, "the row keeps its height");
+    drag(vcx, &format!("tile:{AIRI}"), "tier:NG");
+    assert!(within(vcx, &format!("tiered:{AIRI}"), "tier:NG"));
+    assert_eq!(tall(vcx, "tier:A"), empty, "the row keeps its height");
+    assert_eq!(tall(vcx, "tier:NG"), empty);
     let now = bounds(vcx, "students").expect("the list").top();
     assert_eq!(now, list, "and the list its place");
+}
+
+#[gpui::test]
+fn the_window_has_three_tabs_and_the_third_has_its_sub_tabs(cx: &mut TestAppContext) {
+    let (_, _, vcx) = open(cx);
+    assert!(has(vcx, "tab:対戦") && has(vcx, "tab:履歴") && has(vcx, "tab:編成登録"));
+    for gone in ["編成NG", "編成追加", "編成Tier"] {
+        assert!(
+            !has(vcx, &format!("tab:{gone}")),
+            "{gone} is no tab of its own"
+        );
+    }
+    assert!(!has(vcx, "sub:追加"), "the sub-tabs are of the third tab");
+    click(vcx, "tab:編成登録");
+    // The sub-tabs on one row under the tabs, over what the one open shows: 追加 at first.
+    let row = ["sub:追加", "sub:Tier表", "sub:編集"];
+    let places = |vcx: &mut VisualTestContext| row.map(|sub| bounds(vcx, sub).expect(sub));
+    let [add, table, edit] = places(vcx);
+    let tab = bounds(vcx, "tab:編成登録").expect("the tab");
+    assert!(tab.bottom() <= add.top(), "under the tabs");
+    assert!(add.right() <= table.left() && table.right() <= edit.left());
+    assert!(
+        add.top() == table.top() && table.top() == edit.top(),
+        "on one row"
+    );
+    let first = bounds(vcx, "place:0").expect("追加 is open");
+    assert!(add.bottom() <= first.top(), "over the sub-tab's content");
+    // None moves as another is chosen (each as bold chosen or not, as Aoi's).
+    click(vcx, "sub:Tier表");
+    assert!(has(vcx, "tier:S") && !has(vcx, "place:0"));
+    assert_eq!(places(vcx), [add, table, edit]);
+    click(vcx, "sub:編集");
+    assert!(shows(vcx, "「追加」で登録した編成が、ここに並びます。"));
+    assert_eq!(places(vcx), [add, table, edit]);
+    // The sub-tab open stays open while another tab shows.
+    click(vcx, "tab:履歴");
+    assert!(!has(vcx, "sub:編集"));
+    click(vcx, "tab:編成登録");
+    assert!(shows(vcx, "「追加」で登録した編成が、ここに並びます。"));
+}
+
+#[gpui::test]
+fn a_student_is_dragged_into_the_row_of_those_barred_and_out_again(cx: &mut TestAppContext) {
+    let (_, core, vcx) = tiers(cx);
+    let (tile, tiered) = (format!("tile:{AIRI_BAND}"), format!("tiered:{AIRI_BAND}"));
+    // Into the row: she is barred (編成NG), stands there and no longer in the list.
+    drag(vcx, &tile, "tier:NG");
+    assert!(within(vcx, &tiered, "tier:NG") && !has(vcx, &tile));
+    assert_eq!(kept_barred(&core), [AIRI_BAND], "kept");
+    // To a tier: let back in, and in the tier. A student stands in one row.
+    drag(vcx, &tiered, "tier:B");
+    assert!(within(vcx, &tiered, "tier:B") && !within(vcx, &tiered, "tier:NG"));
+    assert!(kept_barred(&core).is_empty());
+    assert_eq!(kept_tiers(&core), [(AIRI_BAND, Tier::B)]);
+    // From the tier to those barred: out of the tier.
+    drag(vcx, &tiered, "tier:NG");
+    assert!(within(vcx, &tiered, "tier:NG"));
+    assert_eq!(kept_barred(&core), [AIRI_BAND]);
+    assert!(kept_tiers(&core).is_empty());
+    // Back onto the list: let back in.
+    drag(vcx, &tiered, "students");
+    assert!(has(vcx, &tile) && !has(vcx, &tiered));
+    assert!(kept_barred(&core).is_empty() && kept_tiers(&core).is_empty());
+}
+
+#[gpui::test]
+fn a_student_barred_by_her_menu_leaves_her_tier_for_the_row_of_those_barred(
+    cx: &mut TestAppContext,
+) {
+    let (_, core, vcx) = open(cx);
+    // ミカ of a tier, in the best attack.
+    Store::open(&core.places.database)
+        .unwrap()
+        .rank(MIKA, Some(Tier::S))
+        .unwrap();
+    set(&core, vcx, |snapshot| {
+        snapshot.tiers = vec![(MIKA, Tier::S)];
+        snapshot.opponent = Some(opponent());
+    });
+    right_click(vcx, "face:attack-0-0-2");
+    click(vcx, "menu:編成NG");
+    assert_eq!(kept_barred(&core), [MIKA]);
+    assert!(kept_tiers(&core).is_empty(), "out of her tier");
+    click(vcx, "tab:編成登録");
+    click(vcx, "sub:Tier表");
+    let tiered = format!("tiered:{MIKA}");
+    assert!(within(vcx, &tiered, "tier:NG") && !within(vcx, &tiered, "tier:S"));
+    // Her menu lets her back in: she stands in no row, in the list again.
+    click(vcx, "tab:対戦");
+    right_click(vcx, "out:attack-0-1-2");
+    click(vcx, "menu:編成NGを外す");
+    click(vcx, "tab:編成登録");
+    assert!(!has(vcx, &tiered) && kept_barred(&core).is_empty());
+}
+
+/// What a formation was told with: its record and the page.
+fn source(battles: u32, wins: u32, url: &str) -> Source {
+    Source {
+        reported: Reported::new(battles, wins),
+        url: Some(url.to_owned()),
+    }
+}
+
+const POST: &str = "https://x.com/someone/status/1";
+
+#[gpui::test]
+fn a_formation_is_registered_with_the_record_and_the_page_it_was_told_with(
+    cx: &mut TestAppContext,
+) {
+    let (rio, core, vcx) = compose(cx);
+    set(&core, vcx, |snapshot| {
+        let mut unseen = opponent();
+        unseen.counsel = Counsel { likely: Vec::new() };
+        snapshot.opponent = Some(unseen);
+    });
+    fill(&rio, vcx, 0, ATTACKS[0]);
+    fill(&rio, vcx, 6, DEFENSE);
+    tell(&rio, vcx, ["20", "18", POST]);
+    click(vcx, "register");
+    assert!(shows(vcx, "登録しました"));
+    let kept = kept_registered(&core);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].source, source(20, 18, POST), "kept with the teams");
+    // The record was that attack's own; the page stays for the next one told of on it.
+    assert_eq!(told(&rio, vcx), ["", "", POST].map(str::to_owned));
+    assert_eq!(draft(&rio, vcx).teams(), Some((ATTACKS[0], DEFENSE)));
+    // Against the opponent with that front, the attack says what it was told with.
+    click(vcx, "tab:対戦");
+    assert!(within(vcx, "text:紹介 20戦18勝", "registered:attack-0-0"));
+}
+
+#[gpui::test]
+fn nothing_is_registered_while_the_record_or_the_page_cannot_be(cx: &mut TestAppContext) {
+    let (rio, core, vcx) = compose(cx);
+    fill(&rio, vcx, 0, ATTACKS[0]);
+    fill(&rio, vcx, 6, DEFENSE);
+    let pressed = |vcx: &mut VisualTestContext, core: &Core| {
+        click(vcx, "register");
+        // No word of blame: the button does nothing (on a hover it says what is missing).
+        assert!(!has(vcx, "keep-error") && !has(vcx, "toast"));
+        kept_registered(core).len()
+    };
+    // Half a record, more wins than battles, no battle; a page that is no address of the web.
+    for half in [
+        ["20", "", ""],
+        ["", "18", ""],
+        ["18", "20", ""],
+        ["0", "0", ""],
+    ] {
+        tell(&rio, vcx, half);
+        assert_eq!(pressed(vcx, &core), 0, "{half:?}");
+    }
+    for no_page in ["x.com/someone", "file:///C:/Windows/notepad.exe"] {
+        tell(&rio, vcx, ["", "", no_page]);
+        assert_eq!(pressed(vcx, &core), 0, "{no_page}");
+    }
+    // What is no digit cannot be entered into the record's fields; digits of full width are.
+    tell(&rio, vcx, ["2a0戦", "１８", ""]);
+    assert_eq!(told(&rio, vcx), ["20", "18", ""].map(str::to_owned));
+    click(vcx, "register");
+    assert!(shows(vcx, "登録しました"));
+    assert_eq!(
+        kept_registered(&core)[0].source.reported,
+        Reported::new(20, 18)
+    );
+    assert_eq!(kept_registered(&core)[0].source.url, None);
+}
+
+/// Registers two formations against `DEFENSE` in the records, as an agent would (`mcp`):
+/// the first with a record and a page, the second (with トキ) with nothing told. Their
+/// numbers.
+fn two_registered(core: &Core) -> (i64, i64) {
+    let records = Store::open(&core.places.database).unwrap();
+    let first = records.register(ATTACKS[0], DEFENSE, &source(20, 18, POST));
+    let second = records.register(ATTACKS[1], DEFENSE, &Source::default());
+    (first.unwrap().0, second.unwrap().0)
+}
+
+/// The window with the sub-tab open the registrations are listed in (編成登録の「編集」),
+/// two formations registered (`two_registered`).
+fn editing(
+    cx: &mut TestAppContext,
+) -> (Entity<Rio>, Arc<Core>, (i64, i64), &mut VisualTestContext) {
+    let (rio, core, vcx) = open(cx);
+    let registered = two_registered(&core);
+    click(vcx, "tab:編成登録");
+    click(vcx, "sub:編集");
+    (rio, core, registered, vcx)
+}
+
+#[gpui::test]
+fn the_registrations_are_listed_with_what_they_were_told_with(cx: &mut TestAppContext) {
+    let (_, core, (first, second), vcx) = editing(cx);
+    // The one registered last first; each with its two teams, the attack over the defense.
+    let row = |vcx: &mut VisualTestContext, id: i64, part: &str| {
+        let selector = format!("registered:{id}{part}");
+        bounds(vcx, &selector).unwrap_or_else(|| panic!("{selector} is not there"))
+    };
+    assert!(row(vcx, second, "").top() < row(vcx, first, "").top());
+    assert!(row(vcx, first, ":attack").bottom() <= row(vcx, first, ":defense").top());
+    assert!(within(
+        vcx,
+        &format!("registered:{first}:defense"),
+        &format!("registered:{first}")
+    ));
+    // The record it was introduced with, and the page: a press opens it in the browser.
+    assert!(shows(vcx, "紹介 20戦18勝"));
+    assert!(has(vcx, &format!("page:{first}")) && !has(vcx, &format!("page:{second}")));
+    assert_eq!(vcx.opened_url(), None);
+    // The page is as wide as its words: a press in the room beside them opens nothing.
+    let (page, button) = (
+        bounds(vcx, &format!("page:{first}")).expect("the page"),
+        bounds(vcx, &format!("edit-{first}")).expect("the button"),
+    );
+    assert!(page.right() < button.left() - px(40.), "{page:?}");
+    let beside = gpui::point(button.left() - px(20.), page.center().y);
+    vcx.simulate_click(beside, Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(vcx.opened_url(), None);
+    click(vcx, &format!("page:{first}"));
+    assert_eq!(vcx.opened_url().as_deref(), Some(POST));
+    // What other hands wrote into the records as a page is shown, and opens nothing.
+    let other = "file:///C:/Windows/notepad.exe";
+    let records = rusqlite::Connection::open(&core.places.database).unwrap();
+    let written = records.execute(
+        "UPDATE registered SET url = ?1 WHERE id = ?2",
+        (other, first),
+    );
+    assert_eq!(written.unwrap(), 1);
+    click(vcx, "sub:追加");
+    click(vcx, "sub:編集");
+    click(vcx, &format!("page:{first}"));
+    assert_eq!(
+        vcx.opened_url().as_deref(),
+        Some(POST),
+        "nothing new was opened"
+    );
+}
+
+#[gpui::test]
+fn what_an_agent_registered_shows_as_the_list_opens_again(cx: &mut TestAppContext) {
+    let (_, core, vcx) = open(cx);
+    click(vcx, "tab:編成登録");
+    click(vcx, "sub:編集");
+    assert!(shows(vcx, "「追加」で登録した編成が、ここに並びます。"));
+    // Registered meanwhile, by another process: nothing tells the window.
+    let (first, second) = two_registered(&core);
+    assert!(!has(vcx, &format!("registered:{first}")));
+    // The sub-tab opened again, or its tab.
+    click(vcx, "sub:Tier表");
+    click(vcx, "sub:編集");
+    assert!(has(vcx, &format!("registered:{first}")) && has(vcx, &format!("registered:{second}")));
+    Store::open(&core.places.database)
+        .unwrap()
+        .forget(second)
+        .unwrap();
+    click(vcx, "tab:履歴");
+    click(vcx, "tab:編成登録");
+    assert!(has(vcx, &format!("registered:{first}")) && !has(vcx, &format!("registered:{second}")));
+}
+
+#[gpui::test]
+fn a_registration_is_changed_in_the_places_and_what_they_held_comes_back(cx: &mut TestAppContext) {
+    let (rio, core, (first, second), vcx) = editing(cx);
+    // A formation half put together, and a page typed.
+    click(vcx, "sub:追加");
+    click(vcx, &format!("tile:{AIRI_BAND}"));
+    tell(&rio, vcx, ["", "", "https://example.com/next"]);
+    let before = (draft(&rio, vcx), told(&rio, vcx));
+    // 編集 takes the registration into the places and the fields; the button saves the change.
+    click(vcx, "sub:編集");
+    click(vcx, &format!("edit-{first}"));
+    assert!(
+        has(vcx, "place:0") && !has(vcx, &format!("registered:{first}")),
+        "in 追加"
+    );
+    // (The records keep a team's specials the smaller id first.)
+    let attack = [10005, 10037, 10059, 10006, 20008, 20016];
+    assert_eq!(draft(&rio, vcx).teams(), Some((attack, DEFENSE)));
+    assert_eq!(told(&rio, vcx), ["20", "18", POST].map(str::to_owned));
+    assert!(
+        shows(vcx, "変更を保存") && !shows(vcx, "編成登録"),
+        "the button says so"
+    );
+    assert!(has(vcx, "cancel"));
+    // Another record and another fourth striker: under the same number.
+    tell(&rio, vcx, ["10", "7", POST]);
+    click(vcx, "place:3");
+    click(vcx, &format!("tile:{AIRI_BAND}"));
+    click(vcx, "register");
+    assert!(shows(vcx, "変更しました"));
+    let kept = kept_registered(&core);
+    assert_eq!(kept.len(), 2, "no new registration");
+    let changed = kept
+        .iter()
+        .find(|one| one.id == first)
+        .expect("the same number");
+    assert_eq!(changed.attack[3], AIRI_BAND);
+    assert_eq!(changed.source, source(10, 7, POST));
+    // The list shows again, with the change; and 追加 holds what it held before.
+    assert!(has(vcx, &format!("registered:{first}")) && shows(vcx, "紹介 10戦7勝"));
+    click(vcx, "sub:追加");
+    assert_eq!((draft(&rio, vcx), told(&rio, vcx)), before);
+    assert!(
+        shows(vcx, "編成登録") && !has(vcx, "cancel"),
+        "a new formation again"
+    );
+
+    // Given up: nothing changes, and what was there comes back as well.
+    click(vcx, "sub:編集");
+    click(vcx, &format!("edit-{second}"));
+    tell(&rio, vcx, ["3", "3", ""]);
+    click(vcx, "cancel");
+    assert!(has(vcx, &format!("registered:{second}")), "the list again");
+    assert_eq!(kept_registered(&core), kept);
+    click(vcx, "sub:追加");
+    assert_eq!((draft(&rio, vcx), told(&rio, vcx)), before);
+
+    // Into the teams of the other registration: the button saves nothing and blames nobody
+    // (it says why on a hover), and the registration stays to be changed.
+    click(vcx, "sub:編集");
+    click(vcx, &format!("edit-{second}"));
+    fill(&rio, vcx, 0, changed.attack);
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_secs(4));
+    vcx.run_until_parked();
+    assert!(!has(vcx, "toast"), "the toasts before are gone");
+    click(vcx, "register");
+    assert!(!has(vcx, "toast"), "no word of blame after a press");
+    assert_eq!(kept_registered(&core), kept);
+    assert!(has(vcx, "cancel"), "still being changed");
+    // With another fourth striker it is no other's teams: it is saved.
+    click(vcx, "place:3");
+    click(vcx, "tile:16017");
+    click(vcx, "register");
+    assert!(shows(vcx, "変更しました"));
+}
+
+#[gpui::test]
+fn a_registration_taken_away_is_put_back_from_the_toast(cx: &mut TestAppContext) {
+    let (_, core, (first, second), vcx) = editing(cx);
+    let was = kept_registered(&core);
+    click(vcx, &format!("delete-{first}"));
+    assert!(!has(vcx, &format!("registered:{first}")) && has(vcx, &format!("registered:{second}")));
+    assert_eq!(kept_registered(&core).len(), 1, "gone from the records");
+    // A slip of the hand: the toast puts it back as it was.
+    assert!(shows(vcx, "削除しました") && has(vcx, "undo"));
+    click(vcx, "undo");
+    assert!(has(vcx, &format!("registered:{first}")) && shows(vcx, "元に戻しました"));
+    assert!(!has(vcx, "undo"));
+    assert_eq!(
+        kept_registered(&core),
+        was,
+        "its number, its record and its page"
+    );
+    // Left alone, the toast goes with its button: the registration stays away.
+    click(vcx, &format!("delete-{second}"));
+    assert!(has(vcx, "undo"));
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_secs(9));
+    vcx.run_until_parked();
+    assert!(!has(vcx, "undo") && !shows(vcx, "削除しました"));
+    assert_eq!(kept_registered(&core).len(), 1);
+    assert!(!has(vcx, &format!("registered:{second}")));
+}
+
+#[gpui::test]
+fn the_one_being_changed_taken_away_leaves_nothing_to_change(cx: &mut TestAppContext) {
+    let (rio, core, (first, _), vcx) = editing(cx);
+    click(vcx, &format!("edit-{first}"));
+    assert!(has(vcx, "cancel"));
+    // Taken away from the list while its change is not saved.
+    click(vcx, "sub:編集");
+    click(vcx, &format!("delete-{first}"));
+    click(vcx, "sub:追加");
+    assert!(
+        !has(vcx, "cancel") && shows(vcx, "編成登録"),
+        "a new formation"
+    );
+    assert_eq!(
+        draft(&rio, vcx),
+        Draft::new(),
+        "what the places held before"
+    );
+    assert_eq!(kept_registered(&core).len(), 1);
+}
+
+#[gpui::test]
+fn an_attack_registered_is_offered_beside_the_five_with_what_was_told_of_it(
+    cx: &mut TestAppContext,
+) {
+    let (_, core, vcx) = open(cx);
+    set(&core, vcx, |snapshot| {
+        let mut opponent = opponent();
+        // Six attacks that won, each with another first striker, and after them one the
+        // user registered: fought once and lost, told to win eighteen of twenty.
+        let tried = |first: i64, registered: bool| Tried {
+            attack: [first, 10037, 10059, 10006, 20016, 20008],
+            wins: u32::from(!registered),
+            battles: 1,
+            registered,
+            reported: registered.then(|| Reported::new(20, 18)).flatten(),
+        };
+        let firsts = [10005, 10000, 10045, 13000, 13002, 16017];
+        let mut attacks: Vec<Tried> = firsts.map(|first| tried(first, false)).into();
+        attacks.push(tried(AIRI_BAND, true));
+        opponent.counsel.likely[0].attacks = attacks;
+        snapshot.opponent = Some(opponent);
+    });
+    // Five of the others, and the registered one after them: never dropped.
+    assert!(has(vcx, "candidate:attack-0-5") && !has(vcx, "candidate:attack-0-6"));
+    assert!(has(vcx, "registered:attack-0-5"));
+    assert!(within(vcx, "text:紹介 20戦18勝", "candidate:attack-0-5"));
+    assert!(
+        within(vcx, "text:1戦0勝", "registered:attack-0-5"),
+        "its own battle too"
+    );
+    assert!(!has(vcx, "registered:attack-0-0"));
+    click(vcx, "candidate:attack-0-5");
+    let attack = [AIRI_BAND, 10037, 10059, 10006, 20016, 20008];
+    assert_eq!(
+        core.chosen(),
+        choice(BEHIND[0], Some(attack)),
+        "to choose like any other"
+    );
+}
+
+#[gpui::test]
+fn the_least_window_shows_a_registration_whole(cx: &mut TestAppContext) {
+    let (_, _, (first, _), vcx) = editing(cx);
+    let (wide, tall) = super::WINDOW_LEAST;
+    vcx.simulate_resize(size(px(wide), px(tall)));
+    vcx.run_until_parked();
+    // The teams, the record, the page and the buttons of a row are within the width.
+    let parts = [
+        format!("registered:{first}"),
+        format!("registered:{first}:attack"),
+        format!("registered:{first}:defense"),
+        "text:紹介 20戦18勝".to_owned(),
+        format!("page:{first}"),
+        format!("edit-{first}"),
+        format!("delete-{first}"),
+    ];
+    for part in &parts {
+        let found = bounds(vcx, part).unwrap_or_else(|| panic!("{part} is not there"));
+        assert!(
+            found.left() >= px(0.) && found.right() <= px(wide),
+            "{part} is cut: {found:?}"
+        );
+    }
+    let (record, button) = (
+        bounds(vcx, "text:紹介 20戦18勝").unwrap(),
+        bounds(vcx, &format!("edit-{first}")).unwrap(),
+    );
+    assert!(
+        record.right() <= button.left(),
+        "the record beside the buttons"
+    );
+    let teams = bounds(vcx, &format!("registered:{first}:attack")).unwrap();
+    assert!(teams.right() <= record.left(), "and beside the teams");
 }

@@ -1,5 +1,6 @@
-//! The tiers the user sorts the students they use often into (編成Tier), S the highest: the
+//! The tiers the user sorts the students they use often into (Tier表), S the highest: the
 //! students of a higher tier are offered first where a formation is put together by hand.
+//! The table's last row holds the students the user keeps out of their attacks (編成NG).
 
 use crate::Student;
 
@@ -38,24 +39,64 @@ impl Tier {
     }
 }
 
+/// A row of the table the students are sorted in (Tier表): a tier, or the students the user
+/// keeps out of their attacks (編成NG). A student stands in one row at most.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Row {
+    Tier(Tier),
+    Barred,
+}
+
+impl Row {
+    /// The rows from the table's top, and the one place that orders them: the tiers, the
+    /// highest first, then those barred (the user, 2026-11-21: NG under D).
+    pub const ALL: [Self; 6] = [
+        Self::Tier(Tier::S),
+        Self::Tier(Tier::A),
+        Self::Tier(Tier::B),
+        Self::Tier(Tier::C),
+        Self::Tier(Tier::D),
+        Self::Barred,
+    ];
+
+    /// What the row's plate says.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Tier(tier) => tier.name(),
+            Self::Barred => "NG",
+        }
+    }
+}
+
 /// The tier of a student among `tiers` (each student once, by id).
 pub fn of(tiers: &[(i64, Tier)], student: i64) -> Option<Tier> {
     let found = tiers.iter().find(|(id, _)| *id == student);
     found.map(|(_, tier)| *tier)
 }
 
-/// The students, those of a higher tier first and those of no tier last; within a tier in
-/// the order given.
-pub fn by_tier<'a>(mut students: Vec<&'a Student>, tiers: &[(i64, Tier)]) -> Vec<&'a Student> {
-    // Stable: `None`, no tier, is the last of the keys.
-    students
-        .sort_by_key(|student| of(tiers, student.id).map_or(Tier::ALL.len() as i64, Tier::rank));
+/// The students, those of a higher tier first, then those of no tier, and last those
+/// `barred`: a formation told of may hold students the user cannot send. Within each in the
+/// order given.
+pub fn by_tier<'a>(
+    mut students: Vec<&'a Student>,
+    tiers: &[(i64, Tier)],
+    barred: &[i64],
+) -> Vec<&'a Student> {
+    // Stable. After the tiers' own keys: no tier, then barred.
+    let (none, last) = (Tier::ALL.len() as i64, Tier::ALL.len() as i64 + 1);
+    students.sort_by_key(|student| {
+        if barred.contains(&student.id) {
+            last
+        } else {
+            of(tiers, student.id).map_or(none, Tier::rank)
+        }
+    });
     students
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Tier, by_tier, of};
+    use super::{Row, Tier, by_tier, of};
     use crate::{Armor, Attack, Role, Squad, Student};
 
     #[test]
@@ -96,14 +137,36 @@ mod tests {
         let tiers = [(1, Tier::B), (2, Tier::S), (3, Tier::B), (6, Tier::D)];
         let ids = |found: Vec<&Student>| -> Vec<i64> { found.iter().map(|one| one.id).collect() };
         assert_eq!(
-            ids(by_tier(students.iter().collect(), &tiers)),
+            ids(by_tier(students.iter().collect(), &tiers, &[])),
             [2, 1, 3, 6, 5, 4],
             "S, then B as given (1 before 3), then D, then those of no tier as given"
         );
         assert_eq!(
-            ids(by_tier(students.iter().collect(), &[])),
+            ids(by_tier(students.iter().collect(), &[], &[])),
             [5, 1, 4, 2, 3, 6],
             "nobody in a tier: the order given"
         );
+        // Those barred stand last, after those of no tier, as given.
+        assert_eq!(
+            ids(by_tier(students.iter().collect(), &tiers, &[4, 5])),
+            [2, 1, 3, 6, 5, 4],
+            "5 and 4 are of no tier and barred: last as given"
+        );
+        assert_eq!(
+            ids(by_tier(students.iter().collect(), &[(2, Tier::S)], &[1, 5])),
+            [2, 4, 3, 6, 5, 1],
+            "S, those of no tier, then those barred"
+        );
+    }
+
+    #[test]
+    fn the_tables_rows_are_the_tiers_and_under_them_those_barred() {
+        let names: Vec<_> = Row::ALL.into_iter().map(Row::name).collect();
+        assert_eq!(names, ["S", "A", "B", "C", "D", "NG"]);
+        // Every tier has its row, and those barred have one.
+        for tier in Tier::ALL {
+            assert!(Row::ALL.contains(&Row::Tier(tier)));
+        }
+        assert!(Row::ALL.contains(&Row::Barred));
     }
 }

@@ -47,6 +47,16 @@ impl Draft {
         }
     }
 
+    /// The two teams of a registration, to change it: every place taken, the attack's
+    /// first striker chosen.
+    pub fn of(attack: [i64; TEAM], defense: [i64; TEAM]) -> Self {
+        let mut places = [None; PLACES];
+        for (place, student) in attack.into_iter().chain(defense).enumerate() {
+            places[place] = Some(student);
+        }
+        Self { places, chosen: 0 }
+    }
+
     /// The place the next student goes into.
     pub fn chosen(&self) -> usize {
         self.chosen
@@ -158,6 +168,18 @@ mod tests {
         draft.choose(8);
         draft.put(20, Main).unwrap();
         assert_eq!((draft.at(8), draft.chosen()), (Some(20), 9));
+    }
+
+    #[test]
+    fn the_teams_of_a_registration_fill_every_place() {
+        let (attack, defense) = ([1, 2, 3, 4, 5, 6], [11, 12, 13, 14, 15, 16]);
+        let draft = Draft::of(attack, defense);
+        assert_eq!(draft.teams(), Some((attack, defense)));
+        assert_eq!(
+            (draft.at(0), draft.at(5), draft.at(6)),
+            (Some(1), Some(6), Some(11))
+        );
+        assert_eq!(draft.chosen(), 0, "the attack's first striker");
     }
 
     #[test]

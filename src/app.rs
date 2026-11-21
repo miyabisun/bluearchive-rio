@@ -13,8 +13,9 @@ use std::{
 use futures::channel::mpsc::UnboundedSender;
 
 use crate::{
-    store::{Kept, Store},
-    tier::Tier,
+    source::Source,
+    store::{Amended, Kept, Registered, Store},
+    tier::{Row, Tier},
     update,
     watch::{self, Choice, Opponent, Status, Update},
 };
@@ -29,7 +30,7 @@ pub struct Snapshot {
     pub battles: Vec<Kept>,
     /// The students the user keeps out of their attacks (編成NG), by id, ascending.
     pub barred: Vec<i64>,
-    /// The students the user sorted into tiers (編成Tier), each with its tier, by id.
+    /// The students the user sorted into tiers (Tier表), each with its tier, by id.
     pub tiers: Vec<(i64, Tier)>,
 }
 
@@ -155,13 +156,42 @@ impl Core {
     }
 
     /// Bars a student from the user's attacks (編成NG) or lets the student back in, kept
-    /// with the records. An attack chosen with a student now barred is given up, its defense
-    /// kept: nobody the user cannot send is marked over the game.
+    /// with the records (see `sorted`).
     pub fn bar(&self, student: i64, barred: bool) -> Result<(), String> {
-        let records = |error: rusqlite::Error| format!("編成NG を保存できません: {error}");
+        self.sorted(student, barred, |store| store.bar(student, barred))
+    }
+
+    /// Puts a student into a row of the table (Tier表: a tier, or those barred), out of the
+    /// row the student stood in; `None` takes the student out of every row.
+    pub fn sort(&self, student: i64, row: Option<Row>) -> Result<(), String> {
+        let barred = row == Some(Row::Barred);
+        self.sorted(student, barred, |store| match row {
+            Some(Row::Tier(tier)) => store.rank(student, Some(tier)),
+            Some(Row::Barred) => store.bar(student, true),
+            None => {
+                store.rank(student, None)?;
+                store.bar(student, false)
+            }
+        })
+    }
+
+    /// Keeps a change to where a student stands, and shows the tiers and those barred as
+    /// the records have them now (a student stands in one row only). An attack chosen with
+    /// a student now `barred` is given up, its defense kept: nobody the user cannot send is
+    /// marked over the game.
+    fn sorted(
+        &self,
+        student: i64,
+        barred: bool,
+        change: impl FnOnce(&Store) -> rusqlite::Result<()>,
+    ) -> Result<(), String> {
+        let records = |error: rusqlite::Error| format!("Tier と編成NG を保存できません: {error}");
         let store = Store::open(&self.places.database).map_err(records)?;
-        store.bar(student, barred).map_err(records)?;
-        let now = store.barred().map_err(records)?;
+        change(&store).map_err(records)?;
+        let (out, tiers) = (
+            store.barred().map_err(records)?,
+            store.tiers().map_err(records)?,
+        );
         if barred
             && let Some(choice) = self.chosen()
             && choice.attack.is_some_and(|team| team.contains(&student))
@@ -169,35 +199,69 @@ impl Core {
             let attack = None;
             self.choose(Some(Choice { attack, ..choice }));
         }
-        self.update(|snapshot| snapshot.barred = now);
+        self.update(|snapshot| (snapshot.barred, snapshot.tiers) = (out, tiers));
         Ok(())
     }
 
-    /// Puts a student into a tier (編成Tier), or takes the student out of the tiers
-    /// (`None`), kept with the records.
-    pub fn rank(&self, student: i64, tier: Option<Tier>) -> Result<(), String> {
-        let records = |error: rusqlite::Error| format!("Tier を保存できません: {error}");
-        let store = Store::open(&self.places.database).map_err(records)?;
-        store.rank(student, tier).map_err(records)?;
-        let now = store.tiers().map_err(records)?;
-        self.update(|snapshot| snapshot.tiers = now);
-        Ok(())
-    }
-
-    /// Registers an attack as told to win against a defense, kept with the records;
-    /// whether it is new. What is counselled against the opponent shown follows.
-    pub fn register(&self, attack: [i64; 6], defense: [i64; 6]) -> Result<bool, String> {
+    /// The formations registered, the one registered last first, as the records have them
+    /// now: an agent may have changed them (`mcp`).
+    pub fn registered(&self) -> Result<Vec<Registered>, String> {
         let store = Store::open(&self.places.database).map_err(not_kept)?;
-        let new = store.register(attack, defense).map_err(not_kept)?;
+        store.registered().map_err(not_kept)
+    }
+
+    /// Changes the registrations in the records, and asks them anew what they counsel
+    /// against the opponent shown.
+    fn registering<T>(
+        &self,
+        change: impl FnOnce(&Store) -> rusqlite::Result<T>,
+    ) -> Result<T, String> {
+        let store = Store::open(&self.places.database).map_err(not_kept)?;
+        let done = change(&store).map_err(not_kept)?;
         self.counsel_anew(&store)?;
-        Ok(new)
+        Ok(done)
     }
 
-    /// Takes a registered attack against a defense away again.
-    pub fn unregister(&self, attack: [i64; 6], defense: [i64; 6]) -> Result<(), String> {
-        let store = Store::open(&self.places.database).map_err(not_kept)?;
-        store.unregister(attack, defense).map_err(not_kept)?;
-        self.counsel_anew(&store)
+    /// Registers an attack as told to win against a defense, with what it was told with;
+    /// whether it is new.
+    pub fn register(
+        &self,
+        attack: [i64; 6],
+        defense: [i64; 6],
+        source: &Source,
+    ) -> Result<bool, String> {
+        self.registering(|store| Ok(store.register(attack, defense, source)?.1))
+    }
+
+    /// Changes a registration's teams and what it was told with.
+    pub fn amend(
+        &self,
+        id: i64,
+        attack: [i64; 6],
+        defense: [i64; 6],
+        source: &Source,
+    ) -> Result<Amended, String> {
+        self.registering(|store| store.amend(id, attack, defense, source))
+    }
+
+    /// Takes a registration away: what it was, to put back (`restore`).
+    pub fn forget(&self, id: i64) -> Result<Option<Registered>, String> {
+        self.registering(|store| store.forget(id))
+    }
+
+    /// Puts a registration taken away back as it was; `false` where its teams were
+    /// registered anew since.
+    pub fn restore(&self, registered: &Registered) -> Result<bool, String> {
+        self.registering(|store| store.restore(registered))
+    }
+
+    /// Takes a registered attack against a defense away again: what it was, if it was.
+    pub fn unregister(
+        &self,
+        attack: [i64; 6],
+        defense: [i64; 6],
+    ) -> Result<Option<Registered>, String> {
+        self.registering(|store| store.unregister(attack, defense))
     }
 
     /// Asks the records anew what they counsel against the opponent shown.

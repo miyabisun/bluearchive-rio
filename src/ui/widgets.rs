@@ -286,7 +286,63 @@ pub fn outlined_button(theme: &Theme, id: &str, label: &str, primary: bool) -> S
         .text_color(color)
         .cursor_pointer()
         .focus(move |s| s.border_color(focused))
-        .child(label.to_owned())
+        .child(text(label.to_owned()))
+}
+
+/// A tab's sub-tabs over a rule, as Aoi's (its `subtabs`): narrower than they are, they
+/// scroll sideways. `label` names the row for a screen reader. The tests find one as
+/// `sub:<name>`.
+pub fn subtabs<T: Copy + PartialEq + 'static>(
+    theme: &Theme,
+    (id, label): (&str, &'static str),
+    choices: &[(T, &'static str)],
+    chosen: T,
+    on_choose: impl Fn(&T, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let on_choose = std::rc::Rc::new(on_choose);
+    div()
+        .id(SharedString::from(format!("subtabs-{id}")))
+        .role(Role::TabList)
+        .aria_label(label)
+        .flex()
+        .flex_none()
+        .mb(SP_3)
+        .overflow_x_scroll()
+        .border_b_1()
+        .border_color(theme.border)
+        .children(choices.iter().map(|&(choice, name)| {
+            let selected = choice == chosen;
+            let on_choose = on_choose.clone();
+            div()
+                .id(SharedString::from(format!("sub-{id}-{name}")))
+                .debug_selector(move || format!("sub:{name}"))
+                .role(Role::Tab)
+                .aria_label(name)
+                .aria_selected(selected)
+                .tab_stop(true)
+                .flex_none()
+                .px(SP_3)
+                .py(SP_1)
+                .mb(px(-1.))
+                .border_b_2()
+                .border_color(if selected {
+                    theme.accent
+                } else {
+                    gpui::transparent_black()
+                })
+                .text_size(FS_SM)
+                .text_color(if selected {
+                    theme.on_surface
+                } else {
+                    theme.muted
+                })
+                // As bold chosen or not, like the header's tabs, so that none moves.
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .child(name)
+                .on_click(move |_, window, cx| on_choose(&choice, window, cx))
+        }))
 }
 
 /// What a tab says before there is anything to show in it.

@@ -6,6 +6,7 @@
 //!   bluearchive-rio list                  the battles kept, the latest first
 //!   bluearchive-rio name <player> <name>  names a player
 //!   bluearchive-rio roster                the students held, as Aoi wrote them
+//!   bluearchive-rio mcp                   serves the registered formations to an agent (MCP)
 
 // The release build has no console window: a command's words go to the console it was started
 // from (`attach_console`).
@@ -16,6 +17,7 @@ use std::{collections::HashMap, error::Error, ops::Range, path::PathBuf};
 use bluearchive_rio::{
     aoi,
     history::Reader,
+    mcp,
     opponent::{self, Front},
     store::{Counsel, Kept, Player, Store},
     students, view, watch,
@@ -27,7 +29,8 @@ const USAGE: &str = "使い方:
   bluearchive-rio predict <png>...        スクリーンショットの対戦相手の、防衛の候補と勝った攻撃の候補
   bluearchive-rio list                    登録した戦闘を新しい順に表示する
   bluearchive-rio name <プレイヤー番号> <名前>  プレイヤーに名前を付ける
-  bluearchive-rio roster                  Aoi が書き出した手持ちの生徒を表示する";
+  bluearchive-rio roster                  Aoi が書き出した手持ちの生徒を表示する
+  bluearchive-rio mcp                     MCP サーバーとして動き、登録した編成を登録・編集・削除する";
 
 /// Where Rio keeps its database (see `app::places`), its folder made.
 fn database() -> Result<PathBuf, Box<dyn Error>> {
@@ -179,7 +182,10 @@ fn main() {
     if std::env::args().len() <= 1 {
         return bluearchive_rio::app::run();
     }
-    attach_console();
+    // The MCP's client talks through the streams it gave: no console's take their place.
+    if std::env::args().nth(1).as_deref() != Some("mcp") {
+        attach_console();
+    }
     if let Err(error) = run() {
         eprintln!("{error}");
         std::process::exit(1);
@@ -237,6 +243,12 @@ fn run() -> Result<(), Box<dyn Error>> {
                 Err(format!("プレイヤー#{player} はいません").into())
             }
         }
+        ["mcp"] => {
+            let (store, students) = (Store::open(&database()?)?, students());
+            let (asked, answers) = (std::io::stdin().lock(), std::io::stdout().lock());
+            mcp::serve(&store, &students, asked, answers)?;
+            Ok(())
+        }
         ["roster"] => {
             let path = aoi::latest().ok_or("ドキュメントのフォルダが分かりません")?;
             let held = aoi::held()?;
@@ -262,6 +274,7 @@ mod tests {
 
     use bluearchive_rio::{
         opponent::Front,
+        source::Reported,
         store::{Counsel, Ground, Kept, Likely, Player, Tried},
     };
 
@@ -305,6 +318,7 @@ mod tests {
             wins: 2,
             battles: 3,
             registered: false,
+            reported: None,
         };
         // The best attack needs トキ, whom the user barred, and one not held.
         let better = Tried {
@@ -312,11 +326,20 @@ mod tests {
             wins: 1,
             battles: 1,
             registered: false,
+            reported: None,
+        };
+        // One the user registered, with the record it was introduced with.
+        let told = Tried {
+            attack: [9, 2, 3, 4, 5, 6],
+            wins: 0,
+            battles: 0,
+            registered: true,
+            reported: Reported::new(20, 18),
         };
         let held: Vec<i64> = (1..10).collect();
         let counsel = Counsel {
             likely: vec![
-                likely([2, 9, 99], Ground::Theirs, 0, vec![better, won]),
+                likely([2, 9, 99], Ground::Theirs, 0, vec![better, won, told]),
                 likely([2, 8, 9], Ground::Trend, 2, Vec::new()),
             ],
         };
@@ -325,6 +348,7 @@ mod tests {
             "対戦相手の防衛: D1 アツコ | SP イロハ / SP ミチル（ドレス）
   1. D2 マリナ / D3 イオリ / D4 生徒#99 （本人 11-17）
      3戦2勝 A1 ホシノ / A2 マリナ / A3 ヒビキ（応援団） / A4 ハスミ（水着） | SP イロハ / SP ミチル（ドレス）
+     紹介 20戦18勝 A1 イオリ / A2 マリナ / A3 ヒビキ（応援団） / A4 ハスミ（水着） | SP イロハ / SP ミチル（ドレス）
      除外 1戦1勝 A1 トキ / A2 マリナ / A3 ヒビキ（応援団） / A4 ハスミ（水着） | SP イロハ / SP 生徒#99
        トキ: 編成NG（右クリックで外せます）
        生徒#99: お迎えしていません（Aoi の生徒一覧にいません）

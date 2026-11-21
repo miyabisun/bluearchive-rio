@@ -3,6 +3,7 @@
 //! what it derives for display comes from `view`.
 
 mod compose;
+mod edit;
 pub mod icons;
 mod students;
 // The window's tests find what is drawn by its `debug_selector`, which GPUI records in debug
@@ -39,12 +40,13 @@ use crate::{
     app::{Core, Places, Snapshot, UpdateCheck, VERSION},
     draft::Draft,
     settings::{Placement, Settings, ThemeChoice},
-    store::{Kept, Player},
+    store::{Kept, Player, Registered},
     view::{self, Out, UpdateState},
     watch::{Choice, Status},
 };
 
 use self::{
+    compose::{Editing, Told},
     icons::{Assets, Glyph, glyph},
     students::Finder,
     theme::{FONT, FS_CAPTION, FS_MD, FS_SM, RADIUS_SM, SP_1, SP_2, SP_3, SP_4, Theme},
@@ -55,11 +57,11 @@ actions!(rio, [FocusNext, FocusPrev, Escape]);
 
 /// The window's size as it first opens (Aoi's, to stand beside the game the same way), and
 /// the least its content is made: as wide as a history row's icons and a short name, and the
-/// button beside the teams put together by hand; as tall as, in the tab that takes the most
-/// (the tiers', with nobody in a tier), all that stands over the students and three rows of
-/// the students.
+/// buttons beside the teams put together by hand; as tall as, in the page that takes the
+/// most (the table of tiers under the sub-tabs, with nobody in a row), all that stands over
+/// the students and three rows of the students.
 const WINDOW: (f32, f32) = (720., 820.);
-const WINDOW_LEAST: (f32, f32) = (420. + compose::BUTTON_ROOM, 576.);
+const WINDOW_LEAST: (f32, f32) = (420. + compose::BUTTON_ROOM, 670.);
 /// How long the window's place has to stay put before it is kept: a drag moves it many times
 /// a second.
 const PLACE_SETTLES: Duration = Duration::from_millis(500);
@@ -90,30 +92,18 @@ pub enum Tab {
     Match,
     /// The battles kept.
     History,
-    /// The students the user keeps out of their attacks (編成NG).
-    Barred,
-    /// An attack told to win and its defense, put together by hand to register (編成追加).
-    Compose,
-    /// The students used often, sorted into tiers to be picked quickly (編成Tier).
-    Tiers,
+    /// The formations told to win, registered by hand (編成登録), in its sub-tabs (`Sub`).
+    Register,
 }
 
 impl Tab {
-    pub const ALL: [Self; 5] = [
-        Self::Match,
-        Self::History,
-        Self::Barred,
-        Self::Compose,
-        Self::Tiers,
-    ];
+    pub const ALL: [Self; 3] = [Self::Match, Self::History, Self::Register];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Match => "対戦",
             Self::History => "履歴",
-            Self::Barred => "編成NG",
-            Self::Compose => "編成追加",
-            Self::Tiers => "編成Tier",
+            Self::Register => "編成登録",
         }
     }
 
@@ -121,11 +111,29 @@ impl Tab {
         match self {
             Self::Match => "match",
             Self::History => "history",
-            Self::Barred => "barred",
-            Self::Compose => "compose",
-            Self::Tiers => "tiers",
+            Self::Register => "register",
         }
     }
+}
+
+/// The sub-tabs of the tab the formations are registered in, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Sub {
+    /// An attack told to win and its defense, put together by hand to register (追加).
+    Add,
+    /// The students used often sorted into tiers, to be picked quickly, and those the user
+    /// keeps out of their attacks in the row under them (Tier表).
+    Tiers,
+    /// The formations registered, to change and to take away (編集).
+    Edit,
+}
+
+impl Sub {
+    pub const ALL: [(Self, &'static str); 3] = [
+        (Self::Add, "追加"),
+        (Self::Tiers, "Tier表"),
+        (Self::Edit, "編集"),
+    ];
 }
 
 /// A student's place in a team as the window shows it.
@@ -192,6 +200,8 @@ pub struct Rio {
     shown: Snapshot,
     settings: Settings,
     tab: Tab,
+    /// The sub-tab open in the tab the formations are registered in.
+    sub: Sub,
     /// Whether the settings page shows in the tabs' place.
     settings_open: bool,
     /// The window's own focus, where it starts.
@@ -210,8 +220,17 @@ pub struct Rio {
     not_kept: Option<String>,
     /// The students of the snapshot, to put into the teams made by hand.
     roster: Rc<Vec<Student>>,
-    /// The teams as far as they are put together.
+    /// The teams as far as they are put together, and what they were told with, as typed.
     draft: Draft,
+    told: Told,
+    /// The registration being changed in the teams' places, where one is.
+    editing: Option<Editing>,
+    /// The formations registered, as the records had them when their list was opened or
+    /// changed here last.
+    registered: Rc<Vec<Registered>>,
+    /// The registration taken away last, for the toast that tells so to offer to put it
+    /// back: the button shows with that toast alone, and the next toast takes this away.
+    undo: Option<Registered>,
     /// What finds the students to put into the teams, and those to sort into tiers.
     picking: Finder,
     ranking: Finder,
@@ -256,12 +275,14 @@ impl Rio {
             .map(|student| (student.id, student.name.clone()))
             .collect();
         let (picking, ranking) = (Finder::new(cx), Finder::new(cx));
+        let told = Told::new(cx);
         Self {
             core,
             updates: Updates::default(),
             shown,
             settings,
             tab: Tab::Match,
+            sub: Sub::Add,
             settings_open: false,
             root_focus: cx.focus_handle(),
             names: Rc::new(names),
@@ -271,6 +292,10 @@ impl Rio {
             not_kept: None,
             roster: Rc::new(roster),
             draft: Draft::new(),
+            told,
+            editing: None,
+            registered: Rc::default(),
+            undo: None,
             picking,
             ranking,
             keeping_place: None,
@@ -320,13 +345,19 @@ impl Rio {
         ));
     }
 
-    /// Shows `text` as a toast, gone after a while unless it `stays`.
-    fn notify_toast(&mut self, text: Option<&str>, stays: bool, cx: &mut Context<Self>) {
+    /// Shows `text` as a toast, gone after `stays` (with no time, when the next one comes).
+    /// What the toast before offered to put back goes with it.
+    fn notify_toast(
+        &mut self,
+        text: Option<&str>,
+        stays: Option<Duration>,
+        cx: &mut Context<Self>,
+    ) {
         self.toast = text.map(|t| SharedString::from(t.to_owned()));
-        self.toast_timer = None;
-        if text.is_some() && !stays {
+        (self.toast_timer, self.undo) = (None, None);
+        if let (Some(_), Some(stays)) = (text, stays) {
             self.toast_timer = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(TOAST_STAYS).await;
+                cx.background_executor().timer(stays).await;
                 let _ = this.update(cx, |this, cx| {
                     this.toast = None;
                     cx.notify();
@@ -340,7 +371,7 @@ impl Rio {
     /// version (with the button to take it) and a failure stay in the page.
     fn check_update(&mut self, cx: &mut Context<Self>) {
         self.update = None;
-        self.notify_toast(Some(&view::update_text(&UpdateState::Checking)), true, cx);
+        self.notify_toast(Some(&view::update_text(&UpdateState::Checking)), None, cx);
         let check = self.updates.check;
         let found = cx.background_executor().spawn(async move { check() });
         cx.spawn(async move |this, cx| {
@@ -350,15 +381,15 @@ impl Rio {
                     current,
                     latest: Some(latest),
                 }) => {
-                    this.notify_toast(None, false, cx);
+                    this.notify_toast(None, None, cx);
                     this.update = Some(UpdateState::Available { current, latest });
                 }
                 Ok(UpdateCheck { current, .. }) => {
                     let text = view::update_text(&UpdateState::Latest { current });
-                    this.notify_toast(Some(&text), false, cx);
+                    this.notify_toast(Some(&text), Some(TOAST_STAYS), cx);
                 }
                 Err(error) => {
-                    this.notify_toast(None, false, cx);
+                    this.notify_toast(None, None, cx);
                     this.update = Some(UpdateState::Failed { error });
                 }
             });
@@ -491,11 +522,7 @@ impl Rio {
                     .font_weight(FontWeight::SEMIBOLD)
                     .cursor_pointer()
                     .child(tab.name())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.tab = tab;
-                        this.settings_open = false;
-                        cx.notify();
-                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_tab(tab, cx)))
             }));
         let status = view::status_view(&self.shown.status);
         let paused = self.shown.status == Status::Paused;
@@ -581,6 +608,46 @@ impl Rio {
                     )
                     .child(div().flex_none().child(settings_button)),
             )
+    }
+
+    /// Opens a tab, in the settings' place too. The list of the registrations is read anew
+    /// as its tab comes into sight.
+    fn open_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        (self.tab, self.settings_open) = (tab, false);
+        if tab == Tab::Register {
+            self.open_sub(self.sub, cx);
+        }
+        cx.notify();
+    }
+
+    /// The tab the formations are registered in: its sub-tabs on the first row (as Aoi's),
+    /// over the one open.
+    fn register_tab(
+        &mut self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let subtabs = widgets::subtabs(
+            theme,
+            ("register", "編成登録の画面"),
+            &Sub::ALL,
+            self.sub,
+            cx.listener(|this, sub: &Sub, _, cx| this.open_sub(*sub, cx)),
+        );
+        let body = match self.sub {
+            Sub::Add => self.compose_tab(theme, window, cx),
+            Sub::Tiers => self.tiers_tab(theme, window, cx),
+            Sub::Edit => self.edit_tab(theme, cx),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(subtabs)
+            .child(body)
+            .into_any_element()
     }
 
     /// The opponent the game showed last: its front as the game shows it, and the defenses
@@ -761,13 +828,19 @@ impl Rio {
                     widgets::candidate(theme, &id, &label, taken)
                         .on_click(cx.listener(move |this, _, _, cx| this.choose(to.clone(), cx)))
                 };
-                // How it fared; one the user registered says so, and its word has the menu
-                // that takes the registration away.
+                // How it fared, a part for each thing told, the row broken between parts
+                // only; one the user registered says so, and its words have the menu that
+                // takes the registration away.
+                let parts = view::fared_parts(tried).into_iter();
                 let fared = div()
                     .id(SharedString::from(format!("fared-{id}")))
-                    .flex_none()
+                    .flex()
+                    .flex_wrap()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_x(SP_2)
                     .font_features(theme::tabular())
-                    .child(text(view::fared(tried)))
+                    .children(parts.map(|part| text(part).flex_none().whitespace_nowrap()))
                     .when(tried.registered, |fared| {
                         let (selector, asked) = (
                             format!("registered:{id}"),
@@ -826,11 +899,12 @@ impl Rio {
         cx.notify();
     }
 
-    /// Takes an attack the user registered against a defense away again.
+    /// Takes an attack the user registered against a defense away again (to put back
+    /// right after, as from the list of the registrations).
     fn unregister(&mut self, attack: [i64; 6], defense: [i64; 6], cx: &mut Context<Self>) {
         self.menu = None;
-        self.not_kept = self.core.unregister(attack, defense).err();
-        cx.notify();
+        let gone = self.core.unregister(attack, defense);
+        self.taken_away(gone, cx);
     }
 
     /// The menu open, where it was asked for: what it is of (a student's name), and the
@@ -897,59 +971,6 @@ impl Rio {
             .snap_to_window_with_margin(px(4.))
             .child(menu);
         Some(deferred(placed).with_priority(1).into_any_element())
-    }
-
-    /// The students the user keeps out of their attacks (編成NG), by name, each with the
-    /// button that lets the student back in; the student's menu (the right button) does so
-    /// too, as on a candidate. No candidate need show a student for that.
-    fn barred_tab(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let page = scroll("barred", &self.content);
-        if self.shown.barred.is_empty() {
-            let how = "攻撃の候補の生徒を右クリックすると、編成NGにできます。";
-            return page
-                .child(widgets::empty(theme, "barred", how))
-                .into_any_element();
-        }
-        let (rio, told) = (cx.weak_entity(), self.menu.is_none());
-        let rows: Vec<_> = (self.shown.barred.iter())
-            .map(|&student| {
-                let name = name_of(&self.names, student);
-                let key = format!("barred-{student}");
-                let icon = portrait(
-                    theme,
-                    &self.names,
-                    key.clone(),
-                    student,
-                    SMALL,
-                    Standing::Plain,
-                    told,
-                );
-                let back =
-                    widgets::outlined_button(theme, &format!("unbar-{student}"), "外す", false)
-                        .aria_label(format!("{name}の編成NGを外す"))
-                        .on_click(cx.listener(move |this, _, _, cx| this.bar(student, false, cx)));
-                div()
-                    .id(SharedString::from(key))
-                    .debug_selector(move || format!("barred:{student}"))
-                    .role(gpui::Role::ListItem)
-                    .aria_label(name.clone())
-                    .flex()
-                    .items_center()
-                    .gap(SP_3)
-                    .py(SP_1)
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .text_size(FS_SM)
-                    .child(icon)
-                    .child(div().flex_1().min_w_0().truncate().child(text(name)))
-                    .child(back)
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        Self::asks_menu(rio.clone(), Asked::Student(student)),
-                    )
-            })
-            .collect();
-        page.children(rows).into_any_element()
     }
 
     /// The battles kept, the latest first: who attacked whom with which students, and who
@@ -1358,11 +1379,14 @@ impl Render for Rio {
             match self.tab {
                 Tab::Match => self.match_tab(&theme, window, cx),
                 Tab::History => self.history_tab(&theme),
-                Tab::Barred => self.barred_tab(&theme, cx),
-                Tab::Compose => self.compose_tab(&theme, window, cx),
-                Tab::Tiers => self.tiers_tab(&theme, window, cx),
+                Tab::Register => self.register_tab(&theme, window, cx),
             }
         };
+        // The toast that tells a registration was taken away offers to put it back.
+        let undo = self.undo.is_some().then(|| {
+            widgets::outlined_button(&theme, "undo", "元に戻す", false)
+                .on_click(cx.listener(|this, _, _, cx| this.put_back(cx)))
+        });
         div()
             .id("rio")
             .key_context("Rio")
@@ -1408,8 +1432,8 @@ impl Render for Rio {
                     // The tab's pictures are kept while it shows, and dropped as another opens.
                     .child(
                         gpui::image_cache(gpui::retain_all(SharedString::from(format!(
-                            "images-{:?}-{}",
-                            self.tab, self.settings_open
+                            "images-{:?}-{:?}-{}",
+                            self.tab, self.sub, self.settings_open
                         ))))
                         .flex()
                         .flex_col()
@@ -1431,8 +1455,14 @@ impl Render for Rio {
                         .child(
                             div()
                                 .id("toast")
+                                .debug_selector(|| "toast".to_owned())
                                 .role(gpui::Role::Status)
                                 .aria_label(toast.clone())
+                                // With a button, what lies under it takes no press of it.
+                                .when(undo.is_some(), |toast| toast.occlude())
+                                .flex()
+                                .items_center()
+                                .gap(SP_3)
                                 .px(SP_4)
                                 .py(SP_2)
                                 .border_1()
@@ -1440,7 +1470,8 @@ impl Render for Rio {
                                 .rounded(RADIUS_SM)
                                 .bg(theme.surface)
                                 .text_size(FS_SM)
-                                .child(text(toast)),
+                                .child(text(toast))
+                                .children(undo),
                         ),
                 )
             })

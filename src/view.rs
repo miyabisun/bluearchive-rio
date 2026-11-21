@@ -3,6 +3,7 @@
 //! window.
 
 use crate::{
+    source::Reported,
     store::{Fought, Ground, Likely, SHOWN, Tried},
     watch::{Screen, Status},
 };
@@ -119,15 +120,32 @@ pub fn ground(ground: Ground) -> &'static str {
     }
 }
 
-/// How an attack fared against the defense: "3戦2勝"; one the user registered says so
-/// ("登録・3戦2勝"), and alone where no battle is kept with it ("登録").
+/// How an attack fared against the defense, in one piece (see `fared_parts`):
+/// "3戦2勝・紹介 20戦18勝".
 pub fn fared(tried: &Tried) -> String {
-    let battles = format!("{}戦{}勝", tried.battles, tried.wins);
-    match (tried.registered, tried.battles) {
-        (false, _) => battles,
-        (true, 0) => "登録".to_owned(),
-        (true, _) => format!("登録・{battles}"),
+    fared_parts(tried).join("・")
+}
+
+/// How an attack fared against the defense, a part for each thing told: the user's own
+/// battles ("3戦2勝"), and of one the user registered the record it was introduced with
+/// ("紹介 20戦18勝"), or "登録" before the rest where it has none.
+pub fn fared_parts(tried: &Tried) -> Vec<String> {
+    let mut said = Vec::new();
+    if tried.registered && tried.reported.is_none() {
+        said.push("登録".to_owned());
     }
+    if tried.battles > 0 || !tried.registered {
+        said.push(format!("{}戦{}勝", tried.battles, tried.wins));
+    }
+    if let Some(told) = tried.reported {
+        said.push(reported(told));
+    }
+    said
+}
+
+/// A record a formation was introduced with, as the window writes it: "紹介 20戦18勝".
+pub fn reported(told: Reported) -> String {
+    format!("紹介 {}戦{}勝", told.battles, told.wins)
 }
 
 /// Why a student is left out of the attacks the user may take: not among the students Aoi
@@ -156,7 +174,8 @@ pub fn out(student: i64, held: Option<&[i64]>, barred: &[i64]) -> Out {
 
 /// The attacks as the window offers them, each with whether it is set aside (one of its
 /// students is left out): those the user can take first, then those set aside, each kind in
-/// the order given and `SHOWN` at most.
+/// the order given. Of a kind, those the user registered are all offered, and `SHOWN` of
+/// the others at most: what was registered against the defense is never dropped.
 pub fn offered<'a>(
     attacks: &'a [Tried],
     held: Option<&[i64]>,
@@ -167,8 +186,13 @@ pub fn offered<'a>(
         team.any(|student| out(*student, held, barred).any())
     };
     let of = |kind: bool| {
+        let mut others = 0;
         let of_kind = attacks.iter().filter(move |tried| aside(tried) == kind);
-        of_kind.take(SHOWN).map(move |tried| (tried, kind))
+        let told = of_kind.filter(move |tried| {
+            others += usize::from(!tried.registered);
+            tried.registered || others <= SHOWN
+        });
+        told.map(move |tried| (tried, kind))
     };
     of(false).chain(of(true)).collect()
 }
@@ -250,8 +274,12 @@ pub fn update_text(update: &UpdateState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Out, Tone, basis, fared, fought_at, kept_at, left_out, offered, out, status_view};
+    use super::{
+        Out, Tone, basis, fared, fared_parts, fought_at, kept_at, left_out, offered, out, reported,
+        status_view,
+    };
     use crate::{
+        source::Reported,
         store::{Fought, Ground, Likely, Tried},
         watch::{Screen, Status},
     };
@@ -349,6 +377,7 @@ mod tests {
             wins: 1,
             battles: 1,
             registered: false,
+            reported: None,
         };
         // The best first, as the records order them: the first and the third need a student
         // the user does not hold or has barred.
@@ -381,6 +410,22 @@ mod tests {
                 .chain([90, 91, 92, 93, 94].map(|first| (first, true)))
                 .collect::<Vec<_>>()
         );
+        // Those the user registered are all told beside the five, where they rank: none of
+        // them is dropped, and none takes another's place.
+        let mut many: Vec<Tried> = (10..19).chain(90..99).map(tried).collect();
+        for registered in [1, 8, 9, 17] {
+            many[registered].registered = true;
+        }
+        let told = firsts(offered(&many, Some(&held), &[]));
+        assert_eq!(
+            told,
+            [10, 11, 12, 13, 14, 15, 18]
+                .map(|first| (first, false))
+                .into_iter()
+                .chain([90, 91, 92, 93, 94, 95, 98].map(|first| (first, true)))
+                .collect::<Vec<_>>(),
+            "11 and 18, 90 and 98 are registered"
+        );
     }
 
     #[test]
@@ -403,19 +448,35 @@ mod tests {
     }
 
     #[test]
-    fn an_attack_is_told_by_its_battles_and_wins() {
+    fn an_attack_is_told_by_its_battles_and_by_what_was_told_of_it() {
         let mut tried = Tried {
             attack: [1, 2, 3, 4, 5, 6],
             wins: 2,
             battles: 3,
             registered: false,
+            reported: None,
         };
         assert_eq!(fared(&tried), "3戦2勝");
+        assert_eq!(fared_parts(&tried), ["3戦2勝"]);
         // One the user registered says so, with its battles if it has any.
         tried.registered = true;
         assert_eq!(fared(&tried), "登録・3戦2勝");
+        assert_eq!(fared_parts(&tried), ["登録", "3戦2勝"]);
+        // The record it was introduced with says it is one told of: after the user's own.
+        tried.reported = Reported::new(20, 18);
+        assert_eq!(fared(&tried), "3戦2勝・紹介 20戦18勝");
+        assert_eq!(fared_parts(&tried), ["3戦2勝", "紹介 20戦18勝"]);
         (tried.wins, tried.battles) = (0, 0);
+        assert_eq!(fared(&tried), "紹介 20戦18勝");
+        // Neither: registered, and no more is known.
+        tried.reported = None;
         assert_eq!(fared(&tried), "登録");
+    }
+
+    #[test]
+    fn a_record_told_is_written_as_the_battles_are() {
+        let told = Reported::new(20, 18).unwrap();
+        assert_eq!(reported(told), "紹介 20戦18勝");
     }
 
     #[test]
