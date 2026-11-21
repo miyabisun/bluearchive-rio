@@ -22,7 +22,7 @@ use crate::{
     listing::{self, Fight, Listed, Match, Sight, Sighting, Sights, Told},
     opponent::Front,
     source::{Reported, Source},
-    tier::Tier,
+    tier::{self, Tier},
 };
 
 /// The students' columns, the attacker's team then the defender's.
@@ -398,7 +398,6 @@ impl Store {
                 latest INTEGER NOT NULL,
                 battle INTEGER UNIQUE REFERENCES battles (id)
             );
-            CREATE TABLE IF NOT EXISTS barred (student INTEGER PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS tiers (student INTEGER PRIMARY KEY, tier INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS registered (
                 id INTEGER PRIMARY KEY,
@@ -430,10 +429,25 @@ impl Store {
         gains("registered", "reported_battles", "INTEGER")?;
         gains("registered", "reported_wins", "INTEGER")?;
         gains("registered", "url", "TEXT")?;
-        // A student stands in a tier or among those barred, never both: one that 0.1.16 or
-        // an older version kept as both is barred alone.
-        connection
-            .execute_batch("DELETE FROM tiers WHERE student IN (SELECT student FROM barred)")?;
+        // Up to 0.1.16 those barred had a table of their own (`barred`). They are rows of
+        // `tiers` now, which keeps one row a student: each is taken over as barred (one of a
+        // tier beside it too: her attacks stay set aside), and the old table goes. An old
+        // version run in between makes its table anew: what it barred is taken over again.
+        let old: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'barred'",
+            [],
+            |row| row.get(0),
+        )?;
+        if old > 0 {
+            connection.execute_batch(&format!(
+                "BEGIN;
+                 INSERT INTO tiers (student, tier) SELECT student, {barred} FROM barred WHERE true
+                 ON CONFLICT (student) DO UPDATE SET tier = excluded.tier;
+                 DROP TABLE barred;
+                 COMMIT;",
+                barred = tier::Row::Barred.rank()
+            ))?;
+        }
         // The versions 0.1.4 to 0.1.7 kept the rows at places in one line (`listed`), some
         // of them wrong. What a record told of a row is taken over, each row by itself
         // (the upper first); where the rows stand is seen anew. A record that has its row
@@ -827,34 +841,58 @@ impl Store {
         Ok(Counsel { likely })
     }
 
-    /// The students the user sorted into tiers, each with its tier, by id.
-    pub fn tiers(&self) -> rusqlite::Result<Vec<(i64, Tier)>> {
-        let mut tiers = self
+    /// The students the user sorted into the rows of the table (Tier表: the tiers and
+    /// those barred, kept in the one table `tiers`), each with its row, by id. A number no
+    /// row has (a later version's) is passed over.
+    fn sorted(&self) -> rusqlite::Result<Vec<(i64, tier::Row)>> {
+        let mut sorted = self
             .0
             .prepare("SELECT student, tier FROM tiers ORDER BY student")?;
-        let kept = tiers
+        let kept = sorted
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<rusqlite::Result<Vec<(i64, i64)>>>()?;
-        let known = |(student, rank)| Tier::of_rank(rank).map(|tier| (student, tier));
+        let known = |(student, rank)| tier::Row::of_rank(rank).map(|row| (student, row));
         Ok(kept.into_iter().filter_map(known).collect())
+    }
+
+    /// Puts `student` into a row of the table, out of the one the student stood in: the
+    /// table keeps one row a student.
+    fn sort(&self, student: i64, row: tier::Row) -> rusqlite::Result<()> {
+        let into = "INSERT INTO tiers (student, tier) VALUES (?1, ?2)
+                    ON CONFLICT (student) DO UPDATE SET tier = excluded.tier";
+        self.0.execute(into, [student, row.rank()]).map(drop)
+    }
+
+    /// Takes `student` out of the table: from among those barred, or (`barred` false) out
+    /// of a tier. One who stands in the other kind of row stays there.
+    fn unsort(&self, student: i64, barred: bool) -> rusqlite::Result<()> {
+        let out = if barred {
+            "DELETE FROM tiers WHERE student = ?1 AND tier = ?2"
+        } else {
+            "DELETE FROM tiers WHERE student = ?1 AND tier <> ?2"
+        };
+        let row = tier::Row::Barred.rank();
+        self.0.execute(out, [student, row]).map(drop)
+    }
+
+    /// The students the user sorted into tiers, each with its tier, by id.
+    pub fn tiers(&self) -> rusqlite::Result<Vec<(i64, Tier)>> {
+        let sorted = self.sorted()?.into_iter();
+        let tiers = sorted.filter_map(|(student, row)| match row {
+            tier::Row::Tier(tier) => Some((student, tier)),
+            tier::Row::Barred => None,
+        });
+        Ok(tiers.collect())
     }
 
     /// Puts `student` into a tier, out of the one the student was in and from among those
     /// barred (a student stands in a tier or among them, never both); `None` takes the
     /// student out of the tiers.
     pub fn rank(&self, student: i64, tier: Option<Tier>) -> rusqlite::Result<()> {
-        let Some(tier) = tier else {
-            let out = "DELETE FROM tiers WHERE student = ?1";
-            return self.0.execute(out, [student]).map(drop);
-        };
-        let change = self.0.unchecked_transaction()?;
-        change.execute("DELETE FROM barred WHERE student = ?1", [student])?;
-        change.execute(
-            "INSERT INTO tiers (student, tier) VALUES (?1, ?2)
-             ON CONFLICT (student) DO UPDATE SET tier = excluded.tier",
-            [student, tier.rank()],
-        )?;
-        change.commit()
+        match tier {
+            Some(tier) => self.sort(student, tier::Row::Tier(tier)),
+            None => self.unsort(student, false),
+        }
     }
 
     /// Registers an attack told to win against a defense (each A1 to A4 or D1 to D4, then
@@ -989,26 +1027,22 @@ impl Store {
 
     /// The students the user keeps out of their attacks (編成NG), by id, ascending.
     pub fn barred(&self) -> rusqlite::Result<Vec<i64>> {
-        let mut barred = self
-            .0
-            .prepare("SELECT student FROM barred ORDER BY student")?;
-        barred.query_map([], |row| row.get(0))?.collect()
+        let sorted = self.sorted()?.into_iter();
+        let barred = sorted.filter_map(|(student, row)| match row {
+            tier::Row::Barred => Some(student),
+            tier::Row::Tier(_) => None,
+        });
+        Ok(barred.collect())
     }
 
     /// Bars `student` from the user's attacks, out of the tier the student was in (see
     /// `rank`), or lets the student back in.
     pub fn bar(&self, student: i64, barred: bool) -> rusqlite::Result<()> {
-        if !barred {
-            let back = "DELETE FROM barred WHERE student = ?1";
-            return self.0.execute(back, [student]).map(drop);
+        if barred {
+            self.sort(student, tier::Row::Barred)
+        } else {
+            self.unsort(student, true)
         }
-        let change = self.0.unchecked_transaction()?;
-        change.execute("DELETE FROM tiers WHERE student = ?1", [student])?;
-        change.execute(
-            "INSERT OR IGNORE INTO barred (student) VALUES (?1)",
-            [student],
-        )?;
-        change.commit()
     }
 
     /// The battles kept, the latest first.
@@ -1314,12 +1348,39 @@ mod tests {
         assert_eq!(store.barred().unwrap(), [20008]);
         store.bar(10062, false).unwrap();
         assert_eq!(store.tiers().unwrap(), [(10062, Tier::B)]);
-        // A database of a version that let a student be both: opened, she is barred alone.
-        let both = "INSERT INTO tiers (student, tier) VALUES (20008, 1)";
-        store.0.execute(both, []).unwrap();
+    }
+
+    #[test]
+    fn those_an_older_version_barred_are_taken_over_as_rows_of_the_tiers() {
+        let store = store();
+        store.rank(10062, Some(Tier::S)).unwrap();
+        store.rank(13010, Some(Tier::C)).unwrap();
+        // As 0.1.16 kept them: a table of their own, and one of them of a tier beside it.
+        let old = "CREATE TABLE barred (student INTEGER PRIMARY KEY);
+                   INSERT INTO barred (student) VALUES (20008), (10062);";
+        store.0.execute_batch(old).unwrap();
+        let tables = |store: &Store| -> i64 {
+            let old = "SELECT COUNT(*) FROM sqlite_master WHERE name = 'barred'";
+            store.0.query_row(old, [], |row| row.get(0)).unwrap()
+        };
+        // Opened, and opened again: each is barred as before, the others' tiers stay, and
+        // the old table is gone.
+        let mut store = Store::prepared(store.0).unwrap();
+        for _ in 0..2 {
+            assert_eq!(store.barred().unwrap(), [10062, 20008]);
+            assert_eq!(store.tiers().unwrap(), [(13010, Tier::C)]);
+            assert_eq!(tables(&store), 0);
+            store = Store::prepared(store.0).unwrap();
+        }
+        // An old version run in between makes its table anew and bars another: taken over
+        // too, beside those barred here.
+        let between = "CREATE TABLE barred (student INTEGER PRIMARY KEY);
+                       INSERT INTO barred (student) VALUES (16010);";
+        store.0.execute_batch(between).unwrap();
         let store = Store::prepared(store.0).unwrap();
-        assert_eq!(store.barred().unwrap(), [20008]);
-        assert_eq!(store.tiers().unwrap(), [(10062, Tier::B)]);
+        assert_eq!(store.barred().unwrap(), [10062, 16010, 20008]);
+        assert_eq!(store.tiers().unwrap(), [(13010, Tier::C)]);
+        assert_eq!(tables(&store), 0);
     }
 
     #[test]

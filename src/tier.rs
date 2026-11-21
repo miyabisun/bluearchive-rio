@@ -32,11 +32,6 @@ impl Tier {
     pub fn rank(self) -> i64 {
         self as i64
     }
-
-    /// The tier the records keep as `rank`; none for a number no tier has.
-    pub fn of_rank(rank: i64) -> Option<Self> {
-        Self::ALL.into_iter().find(|tier| tier.rank() == rank)
-    }
 }
 
 /// A row of the table the students are sorted in (Tier表): a tier, or the students the user
@@ -58,6 +53,20 @@ impl Row {
         Self::Tier(Tier::D),
         Self::Barred,
     ];
+
+    /// The row as the records keep it: a tier's own number, 5 for those barred. A number
+    /// written into the users' records: it stays as it is whatever rows come later.
+    pub fn rank(self) -> i64 {
+        match self {
+            Self::Tier(tier) => tier.rank(),
+            Self::Barred => 5,
+        }
+    }
+
+    /// The row the records keep as `rank`; none for a number no row has.
+    pub fn of_rank(rank: i64) -> Option<Self> {
+        Self::ALL.into_iter().find(|row| row.rank() == rank)
+    }
 
     /// What the row's plate says.
     pub fn name(self) -> &'static str {
@@ -104,13 +113,9 @@ mod tests {
         let names: Vec<_> = Tier::ALL.into_iter().map(Tier::name).collect();
         assert_eq!(names, ["S", "A", "B", "C", "D"]);
         assert!(Tier::S < Tier::A && Tier::C < Tier::D, "the highest first");
-        // As the records keep them, and back.
-        for (rank, tier) in Tier::ALL.into_iter().enumerate() {
-            assert_eq!(tier.rank(), rank as i64);
-            assert_eq!(Tier::of_rank(rank as i64), Some(tier));
-        }
-        assert_eq!(Tier::of_rank(5), None);
-        assert_eq!(Tier::of_rank(-1), None);
+        // As the records keep them.
+        let ranks: Vec<_> = Tier::ALL.into_iter().map(Tier::rank).collect();
+        assert_eq!(ranks, [0, 1, 2, 3, 4]);
     }
 
     #[test]
@@ -168,5 +173,13 @@ mod tests {
             assert!(Row::ALL.contains(&Row::Tier(tier)));
         }
         assert!(Row::ALL.contains(&Row::Barred));
+        // As the records keep them, and back: a tier's own number, then 5 for those barred.
+        let ranks: Vec<_> = Row::ALL.into_iter().map(Row::rank).collect();
+        assert_eq!(ranks, [0, 1, 2, 3, 4, 5]);
+        for row in Row::ALL {
+            assert_eq!(Row::of_rank(row.rank()), Some(row));
+        }
+        assert_eq!(Row::of_rank(6), None);
+        assert_eq!(Row::of_rank(-1), None);
     }
 }
