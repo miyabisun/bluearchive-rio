@@ -22,22 +22,38 @@ env:
 
 jobs:
   publish:
-    if: "github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'release: v')"
+    # A release; and the commit that follows the runners' Rust (tools/rust/follow.sh), which
+    # is built and not published: a new Rust compiles everything anew, and that build is
+    # done here, into the cache, before a release has to wait for it.
+    if: "github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'release: v') || startsWith(github.event.head_commit.message, 'chore: follow Rust ')"
     runs-on: windows-latest
     env:
       ASSET: bluearchive-rio-x86_64-pc-windows-msvc.exe
+      # Whether this run publishes what it builds.
+      PUBLISH: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'release: v') }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@1.96.0
+      # The Rust is the one rust-toolchain.toml names, written nowhere else. It follows the
+      # runners' own (tools/rust/follow.sh): while the two are one Rust, the cache's key,
+      # which counts every Rust installed here, changes only when that Rust does.
+      - name: Set up the Rust of rust-toolchain.toml
+        run: rustup toolchain install
 
       - name: Cache Rust dependencies
+        id: cache
         uses: Swatinem/rust-cache@v2
+
+      - name: Tell when the cache did not match
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          Write-Output "::warning title=Rust cache::No cache matched this build exactly, so it compiles more than usual (everything, after the runners' Rust or this repository's changed)."
 
       # The tag is pushed right after the commit; it must point at it.
       - name: Check that the tag of Cargo.toml's version is this commit
+        if: env.PUBLISH == 'true'
         id: tag
         shell: pwsh
         run: |
@@ -52,6 +68,7 @@ jobs:
         run: cargo build --release --locked
 
       - name: Package the exe and its SHA-256
+        if: env.PUBLISH == 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory dist-release | Out-Null
@@ -61,6 +78,7 @@ jobs:
           Get-Content "dist-release\$env:ASSET.sha256"
 
       - name: Publish the GitHub release
+        if: env.PUBLISH == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}

@@ -312,7 +312,8 @@ Rio は、戦闘履歴のどこか 1 か所でも確実に読めなければ、�
 ## 開発
 
 [Rust](https://www.rust-lang.org/ja/tools/install) を入れて `cargo build --release` を実行すると、
-`target\release\bluearchive-rio.exe` ができます。検査は次の 3 つです。
+`target\release\bluearchive-rio.exe` ができます。使う Rust の版は `rust-toolchain.toml` にあり、rustup が自動で入れます。
+検査は `sh tools/checks.sh` でまとめて走ります。中身は次の 3 つと、下の「Rust の版の追従」のスクリプトのテストです。
 
 ```sh
 cargo fmt --check
@@ -336,6 +337,24 @@ main へ push する前に同じ検査を走らせるには、クローンごと
   手本は、3 つの画面の題字・攻撃と防衛の絵・ダメージの数字・匿名の「？」の絵・一覧の時刻の文字です。
   [Noto Sans JP](https://github.com/notofonts/noto-cjk/tree/main/Sans/SubsetOTF/JP) の `NotoSansJP-Bold.otf` を置いたフォルダを
   引数に付けると、ゲームの上に出す文字の絵（`data/words`）も描き直します。
+
+### Rust の版の追従
+
+Rust の版は固定したままにしません。GitHub Actions の実行環境が持つ版（GitHub が採用した最新の安定版）へ追従します。
+版を書く場所は `rust-toolchain.toml` だけです。
+
+| すること | コマンド | 動き |
+| --- | --- | --- |
+| 見張る | `bash tools/rust/follow.sh` | このリポジトリの版と、GitHub の実行環境の版を表示する。遅れていれば終了コード 10 |
+| 追従する | `bash tools/rust/follow.sh --apply` | `rust-toolchain.toml` を新しい版に書き換え、検査をすべて通してからコミットする。検査が落ちたら何も変えない |
+
+- push の前の門（`.githooks/pre-push`）が毎回見張ります。遅れていると、その場で追従のコミットを作って push を止めます。
+  もう一度 push すると、追従のコミットも一緒に送られます。
+- GitHub の版は、実行環境に入っているソフトの一覧（[actions/runner-images](https://github.com/actions/runner-images)）から読みます。
+  どの一覧かは、最後のリリースの実行の記録が教えます。`gh` が無いときと通信できないときは、見張らずに通します。
+- 新しい版ではまだ検査を通せないときは、`FOLLOW_RUST=off` を付けて push すると、見張りを飛ばせます。
+- 追従のコミット（`chore: follow Rust …`）を push すると、GitHub Actions はビルドだけを行い、公開はしません。
+  新しい版でのビルドのキャッシュがここでできるので、次のリリースが待たされません。
 
 ## ライセンス
 
