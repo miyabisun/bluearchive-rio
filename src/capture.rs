@@ -123,7 +123,7 @@ fn client_rgb(
     let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
     for y in top..top + height {
         let row = (y * frame_width + left) as usize * 4;
-        for pixel in frame[row..row + width as usize * 4].chunks_exact(4) {
+        for pixel in frame[row..row + width as usize * 4].as_chunks::<4>().0 {
             rgb.extend_from_slice(&pixel[..3]);
         }
     }

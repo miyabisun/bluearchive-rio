@@ -398,10 +398,11 @@ mod window {
                         width as usize * height as usize * 4,
                     );
                     // Windows takes blue first, and each colour times its alpha.
-                    for (to, from) in pixels.chunks_exact_mut(4).zip(picture.pixels()) {
+                    let quads = pixels.as_chunks_mut::<4>().0.iter_mut();
+                    for (to, from) in quads.zip(picture.pixels()) {
                         let [r, g, b, alpha] = from.0.map(u32::from);
                         let lit = |colour: u32| (colour * alpha / 255) as u8;
-                        to.copy_from_slice(&[lit(b), lit(g), lit(r), alpha as u8]);
+                        *to = [lit(b), lit(g), lit(r), alpha as u8];
                     }
                     let before = SelectObject(memory, bitmap);
                     put = UpdateLayeredWindow(
