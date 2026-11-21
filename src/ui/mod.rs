@@ -4,6 +4,7 @@
 
 mod compose;
 pub mod icons;
+mod students;
 // The window's tests find what is drawn by its `debug_selector`, which GPUI records in debug
 // builds alone: built with `--release` they would find nothing, so they are not built there.
 #[cfg(test)]
@@ -11,6 +12,7 @@ pub mod icons;
 mod tests;
 pub mod text_input;
 pub mod theme;
+mod tiers;
 mod widgets;
 
 use std::{
@@ -36,7 +38,6 @@ use crate::{
     Student,
     app::{Core, Places, Snapshot, UpdateCheck, VERSION},
     draft::Draft,
-    search::Filter,
     settings::{Placement, Settings, ThemeChoice},
     store::{Kept, Player},
     view::{self, Out, UpdateState},
@@ -45,7 +46,7 @@ use crate::{
 
 use self::{
     icons::{Assets, Glyph, glyph},
-    text_input::TextInput,
+    students::Finder,
     theme::{FONT, FS_CAPTION, FS_MD, FS_SM, RADIUS_SM, SP_1, SP_2, SP_3, SP_4, Theme},
     widgets::text,
 };
@@ -54,10 +55,11 @@ actions!(rio, [FocusNext, FocusPrev, Escape]);
 
 /// The window's size as it first opens (Aoi's, to stand beside the game the same way), and
 /// the least its content is made: as wide as a history row's icons and a short name, and the
-/// button beside the teams put together by hand; as tall as all that stands over the students
-/// to put into them, and three rows of the students.
+/// button beside the teams put together by hand; as tall as, in the tab that takes the most
+/// (the tiers', with nobody in a tier), all that stands over the students and three rows of
+/// the students.
 const WINDOW: (f32, f32) = (720., 820.);
-const WINDOW_LEAST: (f32, f32) = (420. + compose::BUTTON_ROOM, 448.);
+const WINDOW_LEAST: (f32, f32) = (420. + compose::BUTTON_ROOM, 476.);
 /// How long the window's place has to stay put before it is kept: a drag moves it many times
 /// a second.
 const PLACE_SETTLES: Duration = Duration::from_millis(500);
@@ -92,10 +94,18 @@ pub enum Tab {
     Barred,
     /// An attack told to win and its defense, put together by hand to register (編成追加).
     Compose,
+    /// The students used often, sorted into tiers to be picked quickly (編成Tier).
+    Tiers,
 }
 
 impl Tab {
-    pub const ALL: [Self; 4] = [Self::Match, Self::History, Self::Barred, Self::Compose];
+    pub const ALL: [Self; 5] = [
+        Self::Match,
+        Self::History,
+        Self::Barred,
+        Self::Compose,
+        Self::Tiers,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -103,6 +113,7 @@ impl Tab {
             Self::History => "履歴",
             Self::Barred => "編成NG",
             Self::Compose => "編成追加",
+            Self::Tiers => "編成Tier",
         }
     }
 
@@ -112,6 +123,7 @@ impl Tab {
             Self::History => "history",
             Self::Barred => "barred",
             Self::Compose => "compose",
+            Self::Tiers => "tiers",
         }
     }
 }
@@ -200,11 +212,9 @@ pub struct Rio {
     roster: Rc<Vec<Student>>,
     /// The teams as far as they are put together.
     draft: Draft,
-    /// The name typed and the buttons pressed to find students.
-    query: gpui::Entity<TextInput>,
-    filter: Filter,
-    /// Where the students found are scrolled to.
-    students: ScrollHandle,
+    /// What finds the students to put into the teams, and those to sort into tiers.
+    picking: Finder,
+    ranking: Finder,
     /// Keeps the window's place once it stops moving (see `PLACE_SETTLES`).
     keeping_place: Option<Task<()>>,
     /// Where an update stands while it stays in the page: a newer version, taking it, a
@@ -245,9 +255,7 @@ impl Rio {
         let names = (roster.iter())
             .map(|student| (student.id, student.name.clone()))
             .collect();
-        let query = cx.new(|cx| TextInput::new("名前で検索", "", cx));
-        cx.subscribe(&query, |_, _, _: &text_input::Changed, cx| cx.notify())
-            .detach();
+        let (picking, ranking) = (Finder::new(cx), Finder::new(cx));
         Self {
             core,
             updates: Updates::default(),
@@ -263,9 +271,8 @@ impl Rio {
             not_kept: None,
             roster: Rc::new(roster),
             draft: Draft::new(),
-            query,
-            filter: Filter::default(),
-            students: ScrollHandle::new(),
+            picking,
+            ranking,
             keeping_place: None,
             update: None,
             toast: None,
@@ -1353,6 +1360,7 @@ impl Render for Rio {
                 Tab::History => self.history_tab(&theme),
                 Tab::Barred => self.barred_tab(&theme, cx),
                 Tab::Compose => self.compose_tab(&theme, window, cx),
+                Tab::Tiers => self.tiers_tab(&theme, window, cx),
             }
         };
         div()

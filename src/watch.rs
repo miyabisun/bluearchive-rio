@@ -16,6 +16,7 @@ use crate::{
     listing::{self, Band, Fight, Pointed, Told},
     opponent::Front,
     store::{Counsel, Kept, Store},
+    tier::Tier,
 };
 
 /// A screen of the game that Rio reads.
@@ -95,6 +96,8 @@ pub enum Update {
     Opponent(Opponent),
     /// The students the user keeps out of their attacks, as the app starts.
     Barred(Vec<i64>),
+    /// The students the user sorted into tiers, as the app starts.
+    Tiers(Vec<(i64, Tier)>),
 }
 
 /// A record is taken for opened from the list when it shows this shortly after the list:
@@ -396,6 +399,8 @@ fn run(
     );
     let barred = store.barred().map_err(records)?;
     report(Status::NoGame, Some(Update::Barred(barred)));
+    let tiers = store.tiers().map_err(records)?;
+    report(Status::NoGame, Some(Update::Tiers(tiers)));
     // Without the window over the game, the counsel still shows in Rio's own.
     let mut overlay = Overlay::new();
     let (mut steady, mut visit) = (Steady::new(Battle::alike), Visit::default());

@@ -4,62 +4,31 @@
 //! students by a drag. Only the list scrolls.
 
 use gpui::{
-    AnyElement, AppContext as _, Context, Focusable as _, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, Role, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Window, div, linear_color_stop, linear_gradient,
-    prelude::FluentBuilder as _, px, rgb,
+    AnyElement, AppContext as _, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    Pixels, Role, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 
 use super::{
-    Rio, icons, name_of,
-    theme::{self, FS_CAPTION, FS_SM, RADIUS_SM, SP_1, SP_2, SP_3, Theme},
+    Rio, Tab, icons, name_of,
+    students::{Dragged, Ghost, TILE},
+    theme::{self, FS_CAPTION, RADIUS_SM, SP_1, SP_2, SP_3, Theme},
     widgets::{self, text},
 };
 use crate::{
-    ARMOR_MARK, ATTACK_MARK, Armor, Attack, Role as Class, Squad, Student,
+    Squad,
     draft::{TEAM, takes},
-    search,
+    search::{self, Filter},
+    tier,
 };
 
 /// The sides of a place's icon, at most and at least: the two teams stay beside the button
-/// in the narrowest window. And of a student's icon in the list.
+/// in the narrowest window.
 const PLACE: (f32, f32) = (56., 36.);
-pub(super) const TILE: Pixels = px(56.);
 /// What a team's row takes beside its six places: its name, the gaps, the specials'
 /// distance; and the room of the button at the rows' right.
 const ROW_BESIDE: f32 = 32. + 8. + 20. + 8.;
 pub(super) const BUTTON_ROOM: f32 = 12. + 96.;
-/// The least the search field is wide.
-const FIELD: Pixels = px(160.);
-
-/// What is dragged: a student of the list, or the student standing at a place.
-#[derive(Debug, Clone, Copy)]
-pub(super) enum Dragged {
-    Student(i64, Squad),
-    Place(usize),
-}
-
-impl Dragged {
-    /// The squad of the student dragged: a place of the other squad takes no drop of it.
-    fn squad(self) -> Squad {
-        match self {
-            Self::Student(_, squad) => squad,
-            Self::Place(place) => takes(place),
-        }
-    }
-}
-
-/// What follows the pointer while a student is dragged: the icon.
-struct Ghost {
-    student: i64,
-    size: Pixels,
-}
-
-impl Render for Ghost {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        icons::student(self.student, self.size).opacity(0.85)
-    }
-}
 
 impl Rio {
     /// The tab: the attack's places over the defense's with the button to register them at
@@ -120,77 +89,27 @@ impl Rio {
             .child(teams)
             .child(register);
 
-        let focused = self.query.focus_handle(cx).is_focused(window);
-        let field = div()
-            .id("search")
-            .debug_selector(|| "search".to_owned())
-            .role(Role::SearchInput)
-            .aria_label("名前で検索")
-            // As wide as the row leaves it, from a width a name fits in: what the row breaks by.
-            .flex_grow(1.)
-            .flex_basis(FIELD)
-            .min_w(FIELD)
-            .h(px(32.))
-            .px(SP_2)
-            .border_1()
-            .border_color(if focused { theme.accent } else { theme.border })
-            .rounded(RADIUS_SM)
-            .bg(theme.surface)
-            .text_size(FS_SM)
-            .child(self.query.clone());
-        let class: Hsla = rgb(theme::CLASS).into();
-        let classes = Class::ALL.into_iter().map(|one| {
-            let pressed = self.filter.roles.contains(&one);
-            widgets::mark_button(theme, one.name(), one.mark(), class, pressed).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    search::toggle(&mut this.filter.roles, one);
-                    cx.notify();
-                }),
-            )
-        });
-        let attacks = Attack::ALL.into_iter().map(|one| {
-            let (pressed, colour) = (
-                self.filter.attacks.contains(&one),
-                theme::attack_colour(one),
-            );
-            widgets::mark_button(theme, one.name(), ATTACK_MARK, colour, pressed).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    search::toggle(&mut this.filter.attacks, one);
-                    cx.notify();
-                }),
-            )
-        });
-        let armors = Armor::ALL.into_iter().map(|one| {
-            let (pressed, colour) = (self.filter.armors.contains(&one), theme::armor_colour(one));
-            widgets::mark_button(theme, one.name(), ARMOR_MARK, colour, pressed).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    search::toggle(&mut this.filter.armors, one);
-                    cx.notify();
-                }),
-            )
-        });
-        let kind = || div().flex().flex_none().gap(px(2.));
-        let find = div()
-            .flex()
-            .flex_wrap()
-            .flex_none()
-            .items_center()
-            .gap(SP_2)
-            .mt(SP_3)
-            .child(field)
-            .child(kind().children(classes))
-            .child(kind().children(attacks))
-            .child(kind().children(armors));
-
-        let query = self.query.read(cx).text().to_owned();
-        let found = search::found(
-            &self.roster,
-            &query,
-            &self.filter,
-            takes(self.draft.chosen()),
-        );
+        let finder = self.finder(Tab::Compose);
+        let query = finder.query.read(cx).text().to_owned();
+        // Nobody is offered who cannot go into the place chosen: its squad alone.
+        let offered = Filter {
+            squads: vec![takes(self.draft.chosen())],
+            ..finder.filter.clone()
+        };
+        // Those the user sorted into a tier first, the highest tier before the others; by
+        // name within a tier, and among those in none.
+        let found = search::found(&self.roster, &query, &offered);
+        let found = tier::by_tier(found, &self.shown.tiers);
         let tiles: Vec<_> = (found.into_iter())
-            .map(|student| self.tile(student, cx))
+            .map(|student| {
+                let (id, squad) = (student.id, student.squad);
+                // The list is of one squad: the frame tells the tier.
+                let tier = tier::of(&self.shown.tiers, id);
+                let frame = tier.map_or(theme.border, theme::tier_colour);
+                Self::tile(student, "tile", TILE, frame, tier)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.put(id, squad, cx)))
+            })
             .collect();
         let none = tiles.is_empty();
         let students = div()
@@ -202,7 +121,7 @@ impl Rio {
             .min_h_0()
             .mt(SP_2)
             .overflow_y_scroll()
-            .track_scroll(&self.students)
+            .track_scroll(&finder.scroll)
             .child(div().flex().flex_wrap().gap(SP_1).pb(SP_2).children(tiles))
             .when(none, |list| {
                 list.child(widgets::quiet(theme, "当てはまる生徒がいません。"))
@@ -213,7 +132,10 @@ impl Rio {
             .flex_1()
             .min_h_0()
             .child(top)
-            .child(find)
+            .child(
+                self.finding(theme, Tab::Compose, false, window, cx)
+                    .mt(SP_3),
+            )
             .child(students)
             .into_any_element()
     }
@@ -321,53 +243,6 @@ impl Rio {
             }))
     }
 
-    /// A student of the list: the icon in a frame of the squad's colour, over the attack
-    /// type's colour at the upper left and the armor type's at the lower right. A click puts
-    /// the student into the place chosen; a drag, into the place it ends on.
-    fn tile(&self, student: &Student, cx: &Context<Self>) -> Stateful<gpui::Div> {
-        let (id, squad) = (student.id, student.squad);
-        let frame = rgb(match squad {
-            Squad::Main => theme::STRIKER,
-            Squad::Support => theme::SPECIAL,
-        });
-        // The two colours meet along the line from the upper right to the lower left, run
-        // into each other over the middle tenth.
-        let ground = linear_gradient(
-            135.,
-            linear_color_stop(theme::attack_colour(student.attack), 0.45),
-            linear_color_stop(theme::armor_colour(student.armor), 0.55),
-        );
-        let told = format!(
-            "{}\n{}・{}・{}",
-            student.name,
-            student.role.name(),
-            student.attack.name(),
-            student.armor.name()
-        );
-        div()
-            .id(SharedString::from(format!("tile-{id}")))
-            .debug_selector(move || format!("tile:{id}"))
-            .role(Role::Button)
-            .aria_label(student.name.clone())
-            .tooltip(widgets::tooltip(told))
-            .flex_none()
-            .size(TILE)
-            .rounded(RADIUS_SM)
-            .overflow_hidden()
-            .border_2()
-            .border_color(frame)
-            .bg(ground)
-            .cursor_pointer()
-            .child(icons::student(id, TILE - px(4.)))
-            .on_click(cx.listener(move |this, _, _, cx| this.put(id, squad, cx)))
-            .on_drag(Dragged::Student(id, squad), move |_, _, _, cx| {
-                cx.new(|_| Ghost {
-                    student: id,
-                    size: TILE,
-                })
-            })
-    }
-
     /// Puts a student of the list into the place chosen; the next place is chosen then.
     /// The list offers the place's squad alone, so the place takes whoever is clicked.
     fn put(&mut self, student: i64, squad: Squad, cx: &mut Context<Self>) {
@@ -391,7 +266,8 @@ impl Rio {
     /// students are another list, shown from its top.
     fn chose(&mut self, before: usize, cx: &mut Context<Self>) {
         if takes(before) != takes(self.draft.chosen()) {
-            self.students.set_offset(gpui::point(px(0.), px(0.)));
+            let top = gpui::point(px(0.), px(0.));
+            self.finder(Tab::Compose).scroll.set_offset(top);
         }
         cx.notify();
     }

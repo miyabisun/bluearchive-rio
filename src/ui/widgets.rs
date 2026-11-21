@@ -151,14 +151,21 @@ fn row(id: &str, kind: &str) -> Stateful<Div> {
 pub const MARK: gpui::Pixels = px(28.);
 const RAISED: gpui::Pixels = px(3.);
 
-/// A button that stays pressed, told by a white mark on its colour (a class, a type): up, its
-/// face stands over an edge of a darker shade; pressed, the face is sunk onto the edge's
-/// place, darker, in a ring of the text colour. The name is on a hover. The tests find it as
-/// `filter:<label>`, pressed as `pressed:<label>`.
+/// What a `mark_button` is told by: an icon among the marks (see `icons::mark`), or letters.
+#[derive(Debug, Clone, Copy)]
+pub enum Mark<'a> {
+    Icon(&'a str),
+    Letters(&'a str),
+}
+
+/// A button that stays pressed, told by a white mark on its colour (a squad, a class, a type):
+/// up, its face stands over an edge of a darker shade; pressed, the face is sunk onto the
+/// edge's place, darker, in a ring of the text colour. The name is on a hover. The tests find
+/// it as `filter:<label>`, pressed as `pressed:<label>`.
 pub fn mark_button(
     theme: &Theme,
     label: &str,
-    mark: &str,
+    mark: Mark<'_>,
     colour: gpui::Hsla,
     pressed: bool,
 ) -> Stateful<Div> {
@@ -173,7 +180,15 @@ pub fn mark_button(
         .justify_center()
         .size(MARK)
         .rounded(RADIUS_SM)
-        .child(icons::mark(mark, px(18.)));
+        .child(match mark {
+            Mark::Icon(name) => icons::mark(name, px(18.)).into_any_element(),
+            Mark::Letters(letters) => div()
+                .text_size(px(12.))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(gpui::white())
+                .child(letters.to_owned())
+                .into_any_element(),
+        });
     let face = if pressed {
         face.mt(RAISED)
             .bg(shade(0.6))

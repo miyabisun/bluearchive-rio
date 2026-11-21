@@ -21,6 +21,7 @@ use crate::{
     list::Row,
     listing::{self, Fight, Listed, Match, Sight, Sighting, Sights, Told},
     opponent::Front,
+    tier::Tier,
 };
 
 /// The students' columns, the attacker's team then the defender's.
@@ -302,6 +303,7 @@ impl Store {
                 battle INTEGER UNIQUE REFERENCES battles (id)
             );
             CREATE TABLE IF NOT EXISTS barred (student INTEGER PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS tiers (student INTEGER PRIMARY KEY, tier INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS registered (
                 id INTEGER PRIMARY KEY,
                 added_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
@@ -701,6 +703,32 @@ impl Store {
         Ok(Counsel { likely })
     }
 
+    /// The students the user sorted into tiers, each with its tier, by id.
+    pub fn tiers(&self) -> rusqlite::Result<Vec<(i64, Tier)>> {
+        let mut tiers = self
+            .0
+            .prepare("SELECT student, tier FROM tiers ORDER BY student")?;
+        let kept = tiers
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<(i64, i64)>>>()?;
+        let known = |(student, rank)| Tier::of_rank(rank).map(|tier| (student, tier));
+        Ok(kept.into_iter().filter_map(known).collect())
+    }
+
+    /// Puts `student` into a tier, out of the one the student was in; `None` takes the
+    /// student out of the tiers.
+    pub fn rank(&self, student: i64, tier: Option<Tier>) -> rusqlite::Result<()> {
+        let done = match tier {
+            Some(tier) => self.0.execute(
+                "INSERT INTO tiers (student, tier) VALUES (?1, ?2)
+                 ON CONFLICT (student) DO UPDATE SET tier = excluded.tier",
+                [student, tier.rank()],
+            ),
+            None => (self.0).execute("DELETE FROM tiers WHERE student = ?1", [student]),
+        };
+        done.map(drop)
+    }
+
     /// Registers an attack told to win against a defense (each A1 to A4 or D1 to D4, then
     /// the specials, in either order); whether it is new.
     pub fn register(&self, attack: [i64; 6], defense: [i64; 6]) -> rusqlite::Result<bool> {
@@ -938,6 +966,7 @@ mod tests {
         list::{Ago, Row, Unit},
         listing::{Fight, Sight, Sighting, Sights},
         opponent::Front,
+        tier::Tier,
     };
 
     /// A name of `strokes` upright strokes: two names differ in their strokes.
@@ -979,6 +1008,30 @@ mod tests {
 
     fn store() -> Store {
         Store::open(Path::new(":memory:")).unwrap()
+    }
+
+    #[test]
+    fn a_student_is_in_one_tier_at_a_time() {
+        let store = store();
+        assert!(store.tiers().unwrap().is_empty(), "nobody at first");
+        store.rank(20008, Some(Tier::B)).unwrap();
+        store.rank(10062, Some(Tier::S)).unwrap();
+        assert_eq!(
+            store.tiers().unwrap(),
+            [(10062, Tier::S), (20008, Tier::B)],
+            "by id"
+        );
+        // Moved to another tier, she is in that one alone.
+        store.rank(20008, Some(Tier::D)).unwrap();
+        assert_eq!(store.tiers().unwrap(), [(10062, Tier::S), (20008, Tier::D)]);
+        // Taken out; one never in a tier changes nothing.
+        store.rank(10062, None).unwrap();
+        store.rank(13010, None).unwrap();
+        assert_eq!(store.tiers().unwrap(), [(20008, Tier::D)]);
+        // A number no tier has (a later version's) is passed over.
+        let odd = "INSERT INTO tiers (student, tier) VALUES (1, 9)";
+        store.0.execute(odd, []).unwrap();
+        assert_eq!(store.tiers().unwrap(), [(20008, Tier::D)]);
     }
 
     #[test]

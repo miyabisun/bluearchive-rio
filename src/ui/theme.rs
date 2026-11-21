@@ -3,7 +3,7 @@
 
 use gpui::{App, FontFeatures, Global, Hsla, Pixels, WindowAppearance, px, rgb, rgba};
 
-use crate::{Armor, Attack, settings::ThemeChoice};
+use crate::{Armor, Attack, settings::ThemeChoice, tier::Tier};
 
 pub const SP_1: Pixels = px(4.);
 pub const SP_2: Pixels = px(8.);
@@ -50,6 +50,27 @@ pub fn armor_colour(armor: Armor) -> Hsla {
     };
     rgb(colour).into()
 }
+
+/// The colour of a tier, after the grades of the game's items (purple, yellow, blue, grey)
+/// with a green between: the same in both themes, to be told on either ground.
+pub fn tier_colour(tier: Tier) -> Hsla {
+    let colour = match tier {
+        Tier::S => 0x00a8_6ff0,
+        Tier::A => 0x00e8_b520,
+        Tier::B => 0x003f_8eea,
+        Tier::C => 0x0041_b062,
+        Tier::D => 0x008b_9098,
+    };
+    rgb(colour).into()
+}
+
+/// The letter written on a tier's colour.
+pub const ON_TIER: gpui::Rgba = gpui::Rgba {
+    r: 0.07,
+    g: 0.07,
+    b: 0.07,
+    a: 1.,
+};
 
 /// Figures of the same width, so that counts line up.
 pub fn tabular() -> FontFeatures {

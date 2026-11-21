@@ -14,6 +14,7 @@ use futures::channel::mpsc::UnboundedSender;
 
 use crate::{
     store::{Kept, Store},
+    tier::Tier,
     update,
     watch::{self, Choice, Opponent, Status, Update},
 };
@@ -28,6 +29,8 @@ pub struct Snapshot {
     pub battles: Vec<Kept>,
     /// The students the user keeps out of their attacks (編成NG), by id, ascending.
     pub barred: Vec<i64>,
+    /// The students the user sorted into tiers (編成Tier), each with its tier, by id.
+    pub tiers: Vec<(i64, Tier)>,
 }
 
 impl Snapshot {
@@ -38,6 +41,7 @@ impl Snapshot {
             opponent: None,
             battles: Vec::new(),
             barred: Vec::new(),
+            tiers: Vec::new(),
         }
     }
 
@@ -48,6 +52,7 @@ impl Snapshot {
             Some(Update::Battles(battles)) => self.battles = battles,
             Some(Update::Opponent(opponent)) => self.opponent = Some(opponent),
             Some(Update::Barred(barred)) => self.barred = barred,
+            Some(Update::Tiers(tiers)) => self.tiers = tiers,
             None => {}
         }
     }
@@ -165,6 +170,17 @@ impl Core {
             self.choose(Some(Choice { attack, ..choice }));
         }
         self.update(|snapshot| snapshot.barred = now);
+        Ok(())
+    }
+
+    /// Puts a student into a tier (編成Tier), or takes the student out of the tiers
+    /// (`None`), kept with the records.
+    pub fn rank(&self, student: i64, tier: Option<Tier>) -> Result<(), String> {
+        let records = |error: rusqlite::Error| format!("Tier を保存できません: {error}");
+        let store = Store::open(&self.places.database).map_err(records)?;
+        store.rank(student, tier).map_err(records)?;
+        let now = store.tiers().map_err(records)?;
+        self.update(|snapshot| snapshot.tiers = now);
         Ok(())
     }
 

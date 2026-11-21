@@ -20,6 +20,7 @@ use crate::{
     opponent::Front,
     settings::{Settings, ThemeChoice},
     store::{Counsel, Fought, Ground, Kept, Likely, Player, Store, Tried},
+    tier::Tier,
     watch::{Choice, Opponent, Screen, Status},
 };
 
@@ -776,7 +777,7 @@ fn drag(vcx: &mut VisualTestContext, from: &str, to: &str) {
 
 /// Types into the search field as the IME would, the text settled.
 fn search(rio: &Entity<Rio>, vcx: &mut VisualTestContext, typed: &str) {
-    let field = rio.read_with(vcx, |rio, _| rio.query.clone());
+    let field = rio.read_with(vcx, |rio, _| rio.finder(rio.tab).query.clone());
     field.update_in(vcx, |field, window, cx| {
         let all = 0..field.text().encode_utf16().count();
         field.replace_text_in_range(Some(all), typed, window, cx);
@@ -1010,6 +1011,190 @@ fn the_least_window_shows_the_teams_the_search_and_three_rows_of_students(cx: &m
     let (students, first) = (
         bounds(vcx, "students").expect("the list"),
         bounds(vcx, &format!("tile:{AIRI_BAND}")).expect("the first student"),
+    );
+    // (The tiers' tab takes more over its students and decides how low the window is made:
+    // here a little more than three rows show.)
+    let rows = (students.bottom() - first.top()) / (first.size.height + px(4.));
+    assert!((3. ..4.).contains(&rows), "{rows} rows of students show");
+    assert!(students.bottom() <= px(tall));
+}
+
+/// The window with the tab open the students are sorted into tiers in (編成Tier).
+fn tiers(cx: &mut TestAppContext) -> (Entity<Rio>, Arc<Core>, &mut VisualTestContext) {
+    let (rio, core, vcx) = open(cx);
+    click(vcx, "tab:編成Tier");
+    (rio, core, vcx)
+}
+
+/// The students in tiers, as the records keep them.
+fn kept_tiers(core: &Core) -> Vec<(i64, Tier)> {
+    let records = Store::open(&core.places.database).unwrap();
+    records.tiers().unwrap()
+}
+
+#[gpui::test]
+fn the_tier_tab_has_the_five_tiers_over_the_students_of_both_squads(cx: &mut TestAppContext) {
+    let (_, _, vcx) = tiers(cx);
+    // S to D from the top, each with its letter.
+    let mut top = px(0.);
+    for name in ["S", "A", "B", "C", "D"] {
+        let row = bounds(vcx, &format!("tier:{name}")).unwrap_or_else(|| panic!("no tier {name}"));
+        assert!(row.top() > top, "tier {name} stands under the one before");
+        assert!(shows(vcx, name));
+        top = row.top();
+    }
+    assert!(
+        shows(vcx, "一覧の生徒をドラッグして入れます"),
+        "with nobody in a tier, how one comes into it"
+    );
+    // Under them the search with the squads' buttons before the others, and the students:
+    // the specials and the strikers together, by name.
+    let (field, students) = (
+        bounds(vcx, "search").expect("the search field"),
+        bounds(vcx, "students").expect("the list"),
+    );
+    assert!(top < field.top() && field.bottom() <= students.top());
+    let (strikers, specials, classes) = (
+        bounds(vcx, "filter:ストライカー").expect("the strikers' button"),
+        bounds(vcx, "filter:スペシャル").expect("the specials' button"),
+        bounds(vcx, "filter:タンク").expect("the classes' buttons"),
+    );
+    assert!(strikers.left() < specials.left() && specials.left() < classes.left());
+    let (airi, band) = (
+        bounds(vcx, &format!("tile:{AIRI}")).expect("アイリ, a special"),
+        bounds(vcx, &format!("tile:{AIRI_BAND}")).expect("アイリ（バンド）, a striker"),
+    );
+    assert!(airi.left() < band.left() && airi.top() == band.top());
+}
+
+#[gpui::test]
+fn a_student_is_dragged_into_a_tier_to_another_and_out_again(cx: &mut TestAppContext) {
+    let (_, core, vcx) = tiers(cx);
+    let (tile, tiered) = (format!("tile:{AIRI_BAND}"), format!("tiered:{AIRI_BAND}"));
+    // A click does nothing: the students are sorted by dragging them.
+    click(vcx, &tile);
+    assert!(has(vcx, &tile) && kept_tiers(&core).is_empty());
+    // Into a tier: she stands in its row, and no longer in the list.
+    drag(vcx, &tile, "tier:S");
+    assert!(within(vcx, &tiered, "tier:S"));
+    assert!(!has(vcx, &tile), "gone from the list");
+    assert_eq!(kept_tiers(&core), [(AIRI_BAND, Tier::S)], "kept");
+    assert!(!shows(vcx, "一覧の生徒をドラッグして入れます"));
+    click(vcx, &tiered);
+    assert_eq!(
+        kept_tiers(&core),
+        [(AIRI_BAND, Tier::S)],
+        "a click: nothing"
+    );
+    // A special beside her, into another tier.
+    drag(vcx, &format!("tile:{AIRI}"), "tier:C");
+    assert!(within(vcx, &format!("tiered:{AIRI}"), "tier:C"));
+    // From a tier to another.
+    drag(vcx, &tiered, "tier:B");
+    assert!(within(vcx, &tiered, "tier:B") && !within(vcx, &tiered, "tier:S"));
+    assert_eq!(
+        kept_tiers(&core),
+        [(AIRI_BAND, Tier::B), (AIRI, Tier::C)],
+        "each in one tier"
+    );
+    // Back onto the list: out of the tiers.
+    drag(vcx, &tiered, "students");
+    assert!(has(vcx, &tile) && !has(vcx, &tiered));
+    assert_eq!(kept_tiers(&core), [(AIRI, Tier::C)]);
+}
+
+#[gpui::test]
+fn the_squads_buttons_narrow_the_tier_tabs_students_only(cx: &mut TestAppContext) {
+    let (_, _, vcx) = tiers(cx);
+    let shown = |vcx: &mut VisualTestContext| {
+        let special = has(vcx, &format!("tile:{AIRI}"));
+        (special, has(vcx, &format!("tile:{AIRI_BAND}")))
+    };
+    assert_eq!(shown(vcx), (true, true), "the special and the striker");
+    click(vcx, "filter:ストライカー");
+    assert!(has(vcx, "pressed:ストライカー"));
+    assert_eq!(shown(vcx), (false, true), "the strikers alone");
+    // Both squads pressed: either fits, as within any kind.
+    click(vcx, "filter:スペシャル");
+    assert_eq!(shown(vcx), (true, true));
+    click(vcx, "pressed:ストライカー");
+    assert_eq!(shown(vcx), (true, false), "the specials alone");
+    // Another kind as well: both have to fit (アイリ is a supporter, no tank).
+    click(vcx, "filter:タンク");
+    assert_eq!(shown(vcx), (false, false));
+    // The tab the teams are put together in has its own search: no squads' buttons (the
+    // place chosen tells the squad), and nothing pressed here narrows it.
+    click(vcx, "tab:編成追加");
+    assert!(!has(vcx, "filter:ストライカー") && !has(vcx, "pressed:スペシャル"));
+    assert!(has(vcx, "filter:タンク") && !has(vcx, "pressed:タンク"));
+    assert_eq!(
+        shown(vcx),
+        (false, true),
+        "the strikers, for a striker's place"
+    );
+}
+
+#[gpui::test]
+fn the_teams_are_put_together_from_the_higher_tiers_first(cx: &mut TestAppContext) {
+    let (_, core, vcx) = compose(cx);
+    let left_of = |vcx: &mut VisualTestContext, students: &[i64]| -> bool {
+        let lefts: Vec<_> = (students.iter())
+            .map(|student| {
+                let tile = bounds(vcx, &format!("tile:{student}"));
+                let tile = tile.unwrap_or_else(|| panic!("{student} is not offered"));
+                (tile.top(), tile.left())
+            })
+            .collect();
+        lefts.windows(2).all(|pair| pair[0] < pair[1])
+    };
+    // By name: アイリ（バンド）, アオバ, then アカネ.
+    assert!(left_of(vcx, &[AIRI_BAND, 16017, 13000]));
+    // ホシノ of the highest tier, アル and アカネ of the next: they come first, by tier and
+    // then by name; a special's tier does not show among the strikers.
+    set(&core, vcx, |snapshot| {
+        snapshot.tiers = vec![
+            (10000, Tier::A),
+            (10005, Tier::S),
+            (13000, Tier::A),
+            (AIRI, Tier::S),
+        ];
+    });
+    assert!(left_of(vcx, &[10005, 13000, 10000, AIRI_BAND, 16017]));
+    assert!(!has(vcx, &format!("tile:{AIRI}")));
+    // Among the specials, the special of a tier first.
+    click(vcx, "place:4");
+    assert!(
+        left_of(vcx, &[AIRI, 20019]),
+        "アイリ, then アカネ（バニーガール）"
+    );
+}
+
+#[gpui::test]
+fn the_least_window_shows_the_tiers_the_search_and_three_rows_of_students(cx: &mut TestAppContext) {
+    let (_, _, vcx) = tiers(cx);
+    let (wide, tall) = super::WINDOW_LEAST;
+    vcx.simulate_resize(size(px(wide), px(tall)));
+    vcx.run_until_parked();
+    // Every tier, the search and every button of it are in sight.
+    let mut parts = vec!["tier:S", "tier:D", "search", "filter:ストライカー"];
+    parts.extend(["filter:スペシャル", "filter:タンク", "filter:TS"]);
+    parts.extend([
+        "filter:爆発",
+        "filter:振動",
+        "filter:軽装備",
+        "filter:弾力装甲",
+    ]);
+    for part in parts {
+        let found = bounds(vcx, part).unwrap_or_else(|| panic!("{part} is not there"));
+        assert!(
+            found.left() >= px(0.) && found.right() <= px(wide) && found.bottom() <= px(tall),
+            "{part} is cut: {found:?}"
+        );
+    }
+    // Three rows of students show whole.
+    let (students, first) = (
+        bounds(vcx, "students").expect("the list"),
+        bounds(vcx, &format!("tile:{AIRI}")).expect("the first student"),
     );
     let rows = (students.bottom() - first.top()) / (first.size.height + px(4.));
     assert!((3. ..3.5).contains(&rows), "{rows} rows of students show");

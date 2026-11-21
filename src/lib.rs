@@ -26,6 +26,7 @@ pub mod overlay;
 pub mod search;
 pub mod settings;
 pub mod store;
+pub mod tier;
 pub mod trail;
 pub mod ui;
 pub mod update;
