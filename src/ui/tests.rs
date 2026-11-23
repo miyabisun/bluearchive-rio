@@ -1566,17 +1566,19 @@ fn a_new_formations_record_is_a_battle_won_and_the_arrows_count_in_it(cx: &mut T
     holds(vcx, ["4", "1"]);
     vcx.simulate_keystrokes("down");
     holds(vcx, ["3", "1"]);
-    // No more wins than battles, no less than none.
+    // A win more than the battles is a battle more, won; no less wins than none.
     click(vcx, "told-wins");
-    vcx.simulate_keystrokes("up up up up");
+    vcx.simulate_keystrokes("up up");
     holds(vcx, ["3", "3"]);
-    vcx.simulate_keystrokes("down down down down");
-    holds(vcx, ["3", "0"]);
-    vcx.simulate_keystrokes("up up up");
+    vcx.simulate_keystrokes("up");
+    holds(vcx, ["4", "4"]);
+    vcx.simulate_keystrokes("down down down down down");
+    holds(vcx, ["4", "0"]);
+    vcx.simulate_keystrokes("up up up up");
     // The battles going down take the wins along, and stop at one.
     click(vcx, "told-battles");
     vcx.simulate_keystrokes("down");
-    holds(vcx, ["2", "2"]);
+    holds(vcx, ["3", "3"]);
     vcx.simulate_keystrokes("down down down");
     holds(vcx, ["1", "1"]);
     // As many as a field takes at most.
