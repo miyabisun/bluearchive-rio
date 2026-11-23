@@ -4,13 +4,13 @@
 
 use gpui::{
     AppContext as _, Context, Div, Entity, Focusable as _, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, Role, ScrollHandle, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Window, div, linear_color_stop, linear_gradient,
-    prelude::FluentBuilder as _, px, rgb,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render, Role,
+    ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window,
+    div, linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px, rgb,
 };
 
 use super::{
-    Rio, Sub, icons,
+    Field, Rio, Sub, icons,
     text_input::{self, TextInput},
     theme::{self, FS_SM, RADIUS_SM, SP_2, Theme},
     widgets::{self, Mark},
@@ -117,11 +117,19 @@ impl Rio {
     ) -> Div {
         let finder = self.finder(sub);
         let focused = finder.query.focus_handle(cx).is_focused(window);
+        let asked = Field::Search(sub);
         let field = div()
             .id("search")
             .debug_selector(|| "search".to_owned())
             .role(Role::SearchInput)
-            .aria_label("名前で検索")
+            .aria_label(asked.name())
+            // A press of the right button opens the field's menu, to paste.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.asks_field(asked, event.position, window, cx);
+                }),
+            )
             // As wide as the row leaves it, from a width a name fits in: what the row breaks by.
             .flex_grow(1.)
             .flex_basis(FIELD)

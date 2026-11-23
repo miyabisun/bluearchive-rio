@@ -7,12 +7,12 @@
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Role, Stateful, StatefulInteractiveElement as _,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Role, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 
 use super::{
-    Rio, Sub, icons, name_of,
+    Field, Rio, Sub, icons, name_of,
     students::{Dragged, Ghost, TILE},
     text_input::{self, TextInput},
     theme::{self, FS_CAPTION, FS_SM, RADIUS_SM, SP_1, SP_2, SP_3, Theme},
@@ -22,7 +22,7 @@ use crate::{
     Squad,
     draft::{Draft, TEAM, takes},
     search::{self, Filter},
-    source::{self, Source},
+    source::{self, Figure, Source},
     store::{self, Amended, Registered},
     tier::{self, Sorted},
 };
@@ -36,6 +36,9 @@ const ROW_BESIDE: f32 = 32. + 8. + 20. + 8.;
 pub(super) const BUTTON_ROOM: f32 = 12. + 96.;
 /// How wide a field of the record is: four figures.
 const FIGURES: Pixels = px(56.);
+/// What a field of the record holds for a new formation: a battle, won (the user,
+/// 2026-11-23). The arrow keys count on from it.
+const AT_FIRST: &str = "1";
 
 /// What the formation put together was told with, as it is typed: the battles and the wins
 /// of the record it was introduced with, and the page it comes from.
@@ -48,9 +51,14 @@ pub(super) struct Told {
 impl Told {
     pub(super) fn new(cx: &mut Context<Rio>) -> Self {
         // A field of the record takes digits alone (`source::figures`): what else was
-        // typed goes as soon as the IME has settled it.
-        let figures = |cx: &mut Context<Rio>| {
-            let field = cx.new(|cx| TextInput::new("", "", cx));
+        // typed goes as soon as the IME has settled it. The arrow keys count in it.
+        let figures = |of: Figure, cx: &mut Context<Rio>| {
+            let field = cx.new(|cx| TextInput::new("", AT_FIRST, cx));
+            cx.subscribe(&field, move |this, _, step: &text_input::Stepped, cx| {
+                this.told.step(of, step.up, cx);
+                cx.notify();
+            })
+            .detach();
             cx.subscribe(&field, |_, field, _: &text_input::Changed, cx| {
                 let (typed, settled) = {
                     let field = field.read(cx);
@@ -69,10 +77,22 @@ impl Told {
         cx.subscribe(&url, |_, _, _: &text_input::Changed, cx| cx.notify())
             .detach();
         Self {
-            battles: figures(cx),
-            wins: figures(cx),
+            battles: figures(Figure::Battles, cx),
+            wins: figures(Figure::Wins, cx),
             url,
         }
+    }
+
+    /// What the fields hold for a new formation: the record to count on from, and no page.
+    fn at_first() -> [String; 3] {
+        [AT_FIRST.to_owned(), AT_FIRST.to_owned(), String::new()]
+    }
+
+    /// Takes a step in a field of the record, up or down (`source::stepped`).
+    fn step(&self, of: Figure, up: bool, cx: &mut App) {
+        let [battles, wins, url] = self.typed(cx);
+        let (battles, wins) = source::stepped(&battles, &wins, of, up);
+        self.put(&[battles, wins, url], cx);
     }
 
     /// What the fields hold: the battles, the wins, the page.
@@ -254,15 +274,22 @@ impl Rio {
     }
 
     /// What the formation was told with, to type: the record it was introduced with as the
-    /// window writes it (紹介 20戦18勝), then the page. Either may stay empty.
+    /// window writes it (紹介 20戦18勝), then the page. Either may be empty. A press of the
+    /// right button on a field opens its menu (`asks_field`).
     fn told_row(&self, theme: &Theme, window: &Window, cx: &Context<Self>) -> gpui::Div {
-        let field = |id: &'static str, label: &'static str, input: &Entity<TextInput>| {
+        let field = |id: &'static str, asked: Field, input: &Entity<TextInput>| {
             let focused = input.focus_handle(cx).is_focused(window);
             div()
                 .id(id)
                 .debug_selector(move || id.to_owned())
                 .role(Role::TextInput)
-                .aria_label(label)
+                .aria_label(asked.name())
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        this.asks_field(asked, event.position, window, cx);
+                    }),
+                )
                 .h(px(32.))
                 .px(SP_2)
                 .border_1()
@@ -281,7 +308,8 @@ impl Rio {
         };
         // What the fields are for is on a hover of their word alone: over the fields it
         // would lie on what is typed under them.
-        let how = "紹介された戦績（何戦して何勝か）。空のままでも登録できます。";
+        let how =
+            "紹介された戦績（何戦して何勝か）。↑↓ のキーでも変えられます。空でも登録できます。";
         let told = word("紹介")
             .id("told-word")
             .tooltip(widgets::tooltip(how))
@@ -293,18 +321,18 @@ impl Rio {
             .gap(SP_1)
             .child(told)
             .child(
-                field("told-battles", "紹介の戦数", &self.told.battles)
+                field("told-battles", Field::Battles, &self.told.battles)
                     .flex_none()
                     .w(FIGURES),
             )
             .child(word("戦"))
             .child(
-                field("told-wins", "紹介の勝数", &self.told.wins)
+                field("told-wins", Field::Wins, &self.told.wins)
                     .flex_none()
                     .w(FIGURES),
             )
             .child(word("勝"));
-        let page = field("told-url", "元のページの URL", &self.told.url)
+        let page = field("told-url", Field::Page, &self.told.url)
             .flex_1()
             .min_w_0();
         div()
@@ -485,9 +513,9 @@ impl Rio {
         }
     }
 
-    /// Registers a new formation. The places keep their students and the page stays:
-    /// another attack against the same defense, told of on the same page, is at hand. The
-    /// record was this attack's own: its fields are emptied.
+    /// Registers a new formation. The places keep their students: another attack against
+    /// the same defense is at hand. The record and the page were this attack's own: the
+    /// fields hold again what they hold at first, the page's nothing (the user, 2026-11-23).
     fn add(
         &mut self,
         attack: [i64; TEAM],
@@ -499,8 +527,7 @@ impl Rio {
             Ok(new) => {
                 self.not_kept = None;
                 let said = if new {
-                    let [_, _, url] = self.told.typed(cx);
-                    self.told.put(&[String::new(), String::new(), url], cx);
+                    self.told.put(&Told::at_first(), cx);
                     "登録しました"
                 } else {
                     "登録済みです"

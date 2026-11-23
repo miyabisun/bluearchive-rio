@@ -8,11 +8,11 @@ use std::sync::{
 
 use futures::channel::mpsc;
 use gpui::{
-    Bounds, Entity, EntityInputHandler as _, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
-    Pixels, TestAppContext, VisualTestContext, px, size,
+    Bounds, ClipboardItem, Entity, EntityInputHandler as _, Focusable as _, Modifiers, MouseButton,
+    MouseDownEvent, MouseUpEvent, Pixels, TestAppContext, VisualTestContext, px, size,
 };
 
-use super::{Rio, Tab, Updates, text_input::TextInput, theme::Theme};
+use super::{Rio, Sub, Tab, Updates, text_input::TextInput, theme::Theme};
 use crate::{
     Squad,
     app::{Core, Places, Snapshot, UpdateCheck},
@@ -99,6 +99,11 @@ fn right_click(vcx: &mut VisualTestContext, selector: &str) {
     let position = bounds(vcx, selector)
         .unwrap_or_else(|| panic!("{selector} is not on the screen"))
         .center();
+    right_click_at(vcx, position);
+}
+
+/// A press of the right button at a point of the window.
+fn right_click_at(vcx: &mut VisualTestContext, position: gpui::Point<Pixels>) {
     let (button, modifiers) = (MouseButton::Right, Modifiers::none());
     vcx.simulate_event(MouseDownEvent {
         button,
@@ -960,6 +965,8 @@ fn a_formation_is_registered_once_it_is_whole_and_shows_against_its_front(cx: &m
         let records = Store::open(&core.places.database).unwrap();
         records.counsel(&FRONT, None, 0).unwrap().likely
     };
+    // Nothing is told with this one: the fields of the record emptied.
+    tell(&rio, vcx, ["", "", ""]);
     // Half put together, the button registers nothing.
     fill(&rio, vcx, 0, ATTACKS[0]);
     click(vcx, "register");
@@ -1013,7 +1020,7 @@ fn the_least_window_shows_the_teams_the_search_and_three_rows_of_students(cx: &m
     // The sub-tabs, the button beside the teams, the fields, the search and every button of
     // it are within the width.
     let mut parts = vec!["place:5", "place:11", "register", "search"];
-    parts.extend(["sub:追加", "sub:Tier表", "sub:編集"]);
+    parts.extend(["sub:追加", "sub:編集", "sub:Tier表"]);
     parts.extend(["told-battles", "told-wins", "told-url"]);
     parts.extend(["filter:タンク", "filter:TS", "filter:爆発", "filter:振動"]);
     parts.extend(["filter:軽装備", "filter:弾力装甲"]);
@@ -1265,7 +1272,7 @@ fn the_least_window_shows_the_tiers_the_search_and_three_rows_of_students(cx: &m
         "search",
         "filter:ストライカー",
     ];
-    parts.extend(["sub:追加", "sub:Tier表", "sub:編集"]);
+    parts.extend(["sub:追加", "sub:編集", "sub:Tier表"]);
     parts.extend(["filter:スペシャル", "filter:タンク", "filter:TS"]);
     parts.extend([
         "filter:爆発",
@@ -1354,14 +1361,15 @@ fn the_window_has_three_tabs_and_the_third_has_its_sub_tabs(cx: &mut TestAppCont
     assert!(!has(vcx, "sub:追加"), "the sub-tabs are of the third tab");
     click(vcx, "tab:編成登録");
     // The sub-tabs on one row under the tabs, over what the one open shows: 追加 at first.
-    let row = ["sub:追加", "sub:Tier表", "sub:編集"];
+    // The table is set up for the two before it, as settings are: it stands last.
+    let row = ["sub:追加", "sub:編集", "sub:Tier表"];
     let places = |vcx: &mut VisualTestContext| row.map(|sub| bounds(vcx, sub).expect(sub));
-    let [add, table, edit] = places(vcx);
+    let [add, edit, table] = places(vcx);
     let tab = bounds(vcx, "tab:編成登録").expect("the tab");
     assert!(tab.bottom() <= add.top(), "under the tabs");
-    assert!(add.right() <= table.left() && table.right() <= edit.left());
+    assert!(add.right() <= edit.left() && edit.right() <= table.left());
     assert!(
-        add.top() == table.top() && table.top() == edit.top(),
+        add.top() == edit.top() && edit.top() == table.top(),
         "on one row"
     );
     let first = bounds(vcx, "place:0").expect("追加 is open");
@@ -1369,10 +1377,10 @@ fn the_window_has_three_tabs_and_the_third_has_its_sub_tabs(cx: &mut TestAppCont
     // None moves as another is chosen (each as bold chosen or not, as Aoi's).
     click(vcx, "sub:Tier表");
     assert!(has(vcx, "tier:S") && !has(vcx, "place:0"));
-    assert_eq!(places(vcx), [add, table, edit]);
+    assert_eq!(places(vcx), [add, edit, table]);
     click(vcx, "sub:編集");
     assert!(shows(vcx, "「追加」で登録した編成が、ここに並びます。"));
-    assert_eq!(places(vcx), [add, table, edit]);
+    assert_eq!(places(vcx), [add, edit, table]);
     // The sub-tab open stays open while another tab shows.
     click(vcx, "tab:履歴");
     assert!(!has(vcx, "sub:編集"));
@@ -1490,9 +1498,19 @@ fn a_formation_is_registered_with_the_record_and_the_page_it_was_told_with(
     let kept = kept_registered(&core);
     assert_eq!(kept.len(), 1);
     assert_eq!(kept[0].source, source(20, 18, POST), "kept with the teams");
-    // The record was that attack's own; the page stays for the next one told of on it.
-    assert_eq!(told(&rio, vcx), ["", "", POST].map(str::to_owned));
+    // The record and the page were that attack's own: the fields are as at first again,
+    // for the next one. The places keep their students.
+    assert_eq!(told(&rio, vcx), ["1", "1", ""].map(str::to_owned));
     assert_eq!(draft(&rio, vcx).teams(), Some((ATTACKS[0], DEFENSE)));
+    // Pressed again for the same teams, nothing is kept: what was typed stays to mend.
+    tell(&rio, vcx, ["3", "2", "https://example.com/other"]);
+    click(vcx, "register");
+    assert!(shows(vcx, "登録済みです"));
+    assert_eq!(
+        told(&rio, vcx),
+        ["3", "2", "https://example.com/other"].map(str::to_owned)
+    );
+    assert_eq!(kept_registered(&core), kept);
     // Against the opponent with that front, the attack says what it was told with.
     click(vcx, "tab:対戦");
     assert!(within(vcx, "text:紹介 20戦18勝", "registered:attack-0-0"));
@@ -1533,6 +1551,196 @@ fn nothing_is_registered_while_the_record_or_the_page_cannot_be(cx: &mut TestApp
         Reported::new(20, 18)
     );
     assert_eq!(kept_registered(&core)[0].source.url, None);
+}
+
+#[gpui::test]
+fn a_new_formations_record_is_a_battle_won_and_the_arrows_count_in_it(cx: &mut TestAppContext) {
+    let (rio, _, vcx) = compose(cx);
+    let holds = |vcx: &mut VisualTestContext, [battles, wins]: [&str; 2]| {
+        assert_eq!(told(&rio, vcx), [battles, wins, ""].map(str::to_owned));
+    };
+    holds(vcx, ["1", "1"]);
+    // The arrows count in the field that has the keys: a battle more, a battle less.
+    click(vcx, "told-battles");
+    vcx.simulate_keystrokes("up up up");
+    holds(vcx, ["4", "1"]);
+    vcx.simulate_keystrokes("down");
+    holds(vcx, ["3", "1"]);
+    // No more wins than battles, no less than none.
+    click(vcx, "told-wins");
+    vcx.simulate_keystrokes("up up up up");
+    holds(vcx, ["3", "3"]);
+    vcx.simulate_keystrokes("down down down down");
+    holds(vcx, ["3", "0"]);
+    vcx.simulate_keystrokes("up up up");
+    // The battles going down take the wins along, and stop at one.
+    click(vcx, "told-battles");
+    vcx.simulate_keystrokes("down");
+    holds(vcx, ["2", "2"]);
+    vcx.simulate_keystrokes("down down down");
+    holds(vcx, ["1", "1"]);
+    // As many as a field takes at most.
+    tell(&rio, vcx, ["9999", "1", ""]);
+    vcx.simulate_keystrokes("up");
+    holds(vcx, ["9999", "1"]);
+    // An empty field starts at one.
+    tell(&rio, vcx, ["", "", ""]);
+    vcx.simulate_keystrokes("down");
+    holds(vcx, ["1", ""]);
+    // While the IME composes, the arrows are its own.
+    tell(&rio, vcx, ["5", "5", ""]);
+    let battles = rio.read_with(vcx, |rio, _| rio.told.battles.clone());
+    battles.update_in(vcx, |field, window, cx| {
+        field.replace_and_mark_text_in_range(None, "２", None, window, cx);
+    });
+    vcx.simulate_keystrokes("up down down");
+    holds(vcx, ["5２", "5"]);
+    battles.update_in(vcx, |field, window, cx| field.unmark_text(window, cx));
+    // In the other fields the arrows do nothing.
+    tell(&rio, vcx, ["5", "5", ""]);
+    click(vcx, "told-url");
+    vcx.simulate_keystrokes("up down down");
+    click(vcx, "search");
+    vcx.simulate_keystrokes("up down down");
+    holds(vcx, ["5", "5"]);
+}
+
+/// Puts `text` on the clipboard (the test's own, not the system's).
+fn copy(vcx: &mut VisualTestContext, text: &str) {
+    vcx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+}
+
+/// Whether the field has the keys.
+fn typing_in(vcx: &mut VisualTestContext, field: &Entity<TextInput>) -> bool {
+    field.update_in(vcx, |field, window, cx| {
+        field.focus_handle(cx).is_focused(window)
+    })
+}
+
+#[gpui::test]
+fn a_fields_menu_pastes_what_the_clipboard_holds(cx: &mut TestAppContext) {
+    let (rio, _, vcx) = compose(cx);
+    let (battles, page) = rio.read_with(vcx, |rio, _| {
+        (rio.told.battles.clone(), rio.told.url.clone())
+    });
+    copy(vcx, POST);
+    // A press of the right button on the page's field: the field has the keys, and its menu
+    // is open at the pointer, under the field's name.
+    right_click(vcx, "told-url");
+    assert!(has(vcx, "student-menu") && shows(vcx, "元のページの URL"));
+    assert!(has(vcx, "menu:貼り付け") && !has(vcx, "menu-off:貼り付け"));
+    assert!(typing_in(vcx, &page));
+    // (Wherever the keys go while the menu is open, the paste gives them back to the field.)
+    rio.update_in(vcx, |rio, window, cx| rio.root_focus.focus(window, cx));
+    let (field, menu) = (
+        bounds(vcx, "told-url").expect("the field"),
+        bounds(vcx, "student-menu").expect("the menu"),
+    );
+    // (Drawn on whole pixels.)
+    let off = menu.origin - field.center();
+    assert!(
+        off.x.abs() <= px(1.) && off.y.abs() <= px(1.),
+        "where the pointer is: {menu:?}"
+    );
+    click(vcx, "menu:貼り付け");
+    assert!(!has(vcx, "student-menu"));
+    assert_eq!(told(&rio, vcx), ["1", "1", POST].map(str::to_owned));
+    assert!(typing_in(vcx, &page), "to go on typing");
+    // Where the cursor is, after what the field holds; in place of what is selected.
+    copy(vcx, "?s=20");
+    right_click(vcx, "told-url");
+    click(vcx, "menu:貼り付け");
+    assert_eq!(told(&rio, vcx)[2], format!("{POST}?s=20"));
+    copy(vcx, "https://example.com/next");
+    right_click(vcx, "told-url");
+    vcx.simulate_keystrokes("ctrl-a");
+    click(vcx, "menu:貼り付け");
+    assert_eq!(told(&rio, vcx)[2], "https://example.com/next");
+    // On the field's very edge too, the field takes the keys: the paste key goes there.
+    click(vcx, "place:0");
+    assert!(!typing_in(vcx, &page));
+    let edge = field.origin + gpui::point(px(3.), field.size.height / 2.);
+    right_click_at(vcx, edge);
+    assert!(has(vcx, "menu:貼り付け") && typing_in(vcx, &page));
+    // A field of the record keeps the digits of what is pasted, as of what is typed.
+    copy(vcx, "20戦");
+    right_click(vcx, "told-battles");
+    assert!(shows(vcx, "紹介の戦数") && typing_in(vcx, &battles));
+    vcx.simulate_keystrokes("ctrl-a");
+    click(vcx, "menu:貼り付け");
+    assert_eq!(told(&rio, vcx)[0], "20");
+    copy(vcx, "１８勝");
+    right_click(vcx, "told-wins");
+    assert!(shows(vcx, "紹介の勝数"));
+    vcx.simulate_keystrokes("ctrl-a");
+    click(vcx, "menu:貼り付け");
+    assert_eq!(told(&rio, vcx)[..2], ["20", "18"].map(str::to_owned));
+    // The search of either sub-tab has the menu, each for its own field.
+    let query = |vcx: &mut VisualTestContext| {
+        let both = |rio: &Rio, cx: &gpui::App| {
+            [Sub::Add, Sub::Tiers].map(|sub| rio.finder(sub).query.read(cx).text().to_owned())
+        };
+        rio.read_with(vcx, both)
+    };
+    copy(vcx, "アイリ");
+    right_click(vcx, "search");
+    assert!(shows(vcx, "名前で検索"));
+    click(vcx, "menu:貼り付け");
+    assert_eq!(query(vcx), ["アイリ", ""].map(str::to_owned));
+    assert!(has(vcx, &format!("tile:{AIRI_BAND}")) && !has(vcx, "tile:16017"));
+    click(vcx, "sub:Tier表");
+    copy(vcx, "ミカ");
+    right_click(vcx, "search");
+    click(vcx, "menu:貼り付け");
+    assert_eq!(query(vcx), ["アイリ", "ミカ"].map(str::to_owned));
+}
+
+#[gpui::test]
+fn the_paste_key_puts_the_clipboards_text_into_the_field(cx: &mut TestAppContext) {
+    let (rio, _, vcx) = compose(cx);
+    click(vcx, "told-url");
+    copy(vcx, POST);
+    vcx.simulate_keystrokes("ctrl-v");
+    assert_eq!(told(&rio, vcx), ["1", "1", POST].map(str::to_owned));
+}
+
+#[gpui::test]
+fn a_fields_menu_offers_no_paste_of_nothing_and_closes_like_a_students(cx: &mut TestAppContext) {
+    let (rio, _, vcx) = compose(cx);
+    let at_first = ["1", "1", ""].map(str::to_owned);
+    // Nothing on the clipboard, or a picture and no text: the word is there, and takes no
+    // press.
+    for picture in [false, true] {
+        if picture {
+            let picture = gpui::Image::from_bytes(gpui::ImageFormat::Png, vec![0]);
+            vcx.write_to_clipboard(ClipboardItem::new_image(&picture));
+        }
+        right_click(vcx, "told-url");
+        assert!(has(vcx, "menu-off:貼り付け") && !has(vcx, "menu:貼り付け"));
+        click(vcx, "menu-off:貼り付け");
+        assert!(has(vcx, "student-menu"), "{picture}");
+        assert_eq!(told(&rio, vcx), at_first, "{picture}");
+        // Escape closes it.
+        vcx.simulate_keystrokes("escape");
+        assert!(!has(vcx, "student-menu"));
+    }
+    // With text it is offered; a press beside the menu closes it, and nothing is pasted.
+    copy(vcx, POST);
+    right_click(vcx, "told-url");
+    assert!(has(vcx, "menu:貼り付け"));
+    click(vcx, "place:8");
+    assert!(!has(vcx, "student-menu"));
+    assert_eq!(told(&rio, vcx), at_first);
+    // Another sub-tab opened by the keys: the menu is not of that page.
+    right_click(vcx, "told-url");
+    let turn = |vcx: &mut VisualTestContext, sub| {
+        rio.update(vcx, |rio, cx| rio.open_sub(sub, cx));
+        vcx.run_until_parked();
+    };
+    turn(vcx, Sub::Edit);
+    assert!(!has(vcx, "student-menu"));
+    turn(vcx, Sub::Add);
+    assert!(!has(vcx, "student-menu"), "and does not come back");
 }
 
 /// Registers two formations against `DEFENSE` in the records, as an agent would (`mcp`):
@@ -1675,9 +1883,11 @@ fn a_registration_is_changed_in_the_places_and_what_they_held_comes_back(cx: &mu
         "a new formation again"
     );
 
-    // Given up: nothing changes, and what was there comes back as well.
+    // Given up: nothing changes, and what was there comes back as well. One registered
+    // with nothing told shows its fields empty, not as a new formation's.
     click(vcx, "sub:編集");
     click(vcx, &format!("edit-{second}"));
+    assert_eq!(told(&rio, vcx), ["", "", ""].map(str::to_owned));
     tell(&rio, vcx, ["3", "3", ""]);
     click(vcx, "cancel");
     assert!(has(vcx, &format!("registered:{second}")), "the list again");

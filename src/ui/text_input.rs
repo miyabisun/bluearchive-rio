@@ -35,6 +35,8 @@ actions!(
         Cut,
         Copy,
         Submit,
+        Up,
+        Down,
     ]
 );
 
@@ -155,6 +157,12 @@ impl TextInput {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        self.paste_clipboard(window, cx);
+    }
+
+    /// Puts the clipboard's text where the cursor is, in place of what is selected: what
+    /// the paste key does, and the field's menu.
+    pub fn paste_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.replace_text_in_range(None, &text.replace('\n', " "), window, cx);
         }
@@ -664,6 +672,8 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(|this, _: &Up, _, cx| this.step(true, cx)))
+            .on_action(cx.listener(|this, _: &Down, _, cx| this.step(false, cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -683,6 +693,15 @@ impl EventEmitter<Changed> for TextInput {}
 pub struct Submitted;
 
 impl EventEmitter<Submitted> for TextInput {}
+
+/// Raised on the up and the down arrow, unless the IME is composing (its arrows are the
+/// IME's): a field of a number takes a step by them, any other does nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stepped {
+    pub up: bool,
+}
+
+impl EventEmitter<Stepped> for TextInput {}
 
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, text: &str, cx: &mut Context<Self>) -> Self {
@@ -716,6 +735,12 @@ impl TextInput {
     fn submit(&mut self, _: &Submit, _window: &mut Window, cx: &mut Context<Self>) {
         if !self.is_composing() {
             cx.emit(Submitted);
+        }
+    }
+
+    fn step(&mut self, up: bool, cx: &mut Context<Self>) {
+        if !self.is_composing() {
+            cx.emit(Stepped { up });
         }
     }
 
@@ -774,6 +799,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("home", Home, context),
         KeyBinding::new("end", End, context),
         KeyBinding::new("enter", Submit, context),
+        KeyBinding::new("up", Up, context),
+        KeyBinding::new("down", Down, context),
     ]);
 }
 

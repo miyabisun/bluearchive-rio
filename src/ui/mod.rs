@@ -27,7 +27,7 @@ use std::{
 
 use futures::{StreamExt as _, channel::mpsc};
 use gpui::{
-    AnyElement, App, AppContext as _, AsyncApp, Bounds, Context, FocusHandle, Focusable,
+    AnyElement, App, AppContext as _, AsyncApp, Bounds, Context, Entity, FocusHandle, Focusable,
     FontWeight, InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
     ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, TitlebarOptions,
@@ -49,6 +49,7 @@ use self::{
     compose::{Editing, Told},
     icons::{Assets, Glyph, glyph},
     students::Finder,
+    text_input::TextInput,
     theme::{FONT, FS_CAPTION, FS_MD, FS_SM, RADIUS_SM, SP_1, SP_2, SP_3, SP_4, Theme},
     widgets::text,
 };
@@ -116,23 +117,25 @@ impl Tab {
     }
 }
 
-/// The sub-tabs of the tab the formations are registered in, in order.
+/// The sub-tabs of the tab the formations are registered in, in order: what is done with
+/// the formations first, the table that is set up for it last, as settings are (the user,
+/// 2026-11-23).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Sub {
     /// An attack told to win and its defense, put together by hand to register (追加).
     Add,
+    /// The formations registered, to change and to take away (編集).
+    Edit,
     /// The students used often sorted into tiers, to be picked quickly, and those the user
     /// keeps out of their attacks in the row under them (Tier表).
     Tiers,
-    /// The formations registered, to change and to take away (編集).
-    Edit,
 }
 
 impl Sub {
     pub const ALL: [(Self, &'static str); 3] = [
         (Self::Add, "追加"),
-        (Self::Tiers, "Tier表"),
         (Self::Edit, "編集"),
+        (Self::Tiers, "Tier表"),
     ];
 }
 
@@ -156,12 +159,40 @@ enum Standing {
     Out(Out),
 }
 
-/// What a menu was asked for: a student (to bar or to let back in), or an attack the user
-/// registered against a defense (to take away).
+/// A page of the window: a tab with the sub-tab open in the third, and whether the settings
+/// lie over it.
+type Page = (Tab, Sub, bool);
+
+/// What a menu was asked for: a student (to bar or to let back in), an attack the user
+/// registered against a defense (to take away), or a field (to paste into; with whether the
+/// clipboard held any text as the menu opened).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Asked {
     Student(i64),
     Registered([i64; 6], [i64; 6]),
+    Field(Field, bool),
+}
+
+/// A field to type into: the name the students are found by in a sub-tab, or a part of what
+/// a formation was told with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Search(Sub),
+    Battles,
+    Wins,
+    Page,
+}
+
+impl Field {
+    /// What the field is for, as its accessible name and its menu say.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Search(_) => "名前で検索",
+            Self::Battles => "紹介の戦数",
+            Self::Wins => "紹介の勝数",
+            Self::Page => "元のページの URL",
+        }
+    }
 }
 
 /// How a battle's player is shown: by the name the user gave, by the name as the game draws
@@ -212,9 +243,9 @@ pub struct Rio {
     /// plate holds and whether the theme is dark.
     plates: HashMap<(u64, bool), (Arc<gpui::Image>, f32)>,
     content: ScrollHandle,
-    /// What the open menu was asked for, where, and in which page (a tab, or the settings
-    /// over it): the menu is of that page alone.
-    menu: Option<(Asked, Point<Pixels>, (Tab, bool))>,
+    /// What the open menu was asked for, where, and in which page (`page`): the menu is of
+    /// that page alone.
+    menu: Option<(Asked, Point<Pixels>, Page)>,
     /// Why what the user asked last (a student barred, a formation registered) could not
     /// be kept.
     not_kept: Option<String>,
@@ -885,10 +916,57 @@ impl Rio {
         move |event, _, cx| {
             let at = event.position;
             let _ = rio.update(cx, |this, cx| {
-                this.menu = Some((asked, at, (this.tab, this.settings_open)));
+                this.menu = Some((asked, at, this.page()));
                 cx.notify();
             });
         }
+    }
+
+    /// The page that shows.
+    fn page(&self) -> Page {
+        (self.tab, self.sub, self.settings_open)
+    }
+
+    /// The field itself, to give the keys to and to paste into.
+    fn field(&self, field: Field) -> &Entity<TextInput> {
+        match field {
+            Field::Search(sub) => &self.finder(sub).query,
+            Field::Battles => &self.told.battles,
+            Field::Wins => &self.told.wins,
+            Field::Page => &self.told.url,
+        }
+    }
+
+    /// What a press of the right button does on a field: the field takes the keys, and its
+    /// menu opens where the pointer is, to paste what the clipboard holds.
+    fn asks_field(
+        &mut self,
+        field: Field,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.field(field).focus_handle(cx).focus(window, cx);
+        // The window's own focus, which lies under the field, takes the keys of no press
+        // on the field's edge.
+        window.prevent_default();
+        // (A text of nothing is no text to the clipboard either.)
+        let pastes = cx
+            .read_from_clipboard()
+            .and_then(|held| held.text())
+            .is_some();
+        self.menu = Some((Asked::Field(field, pastes), at, self.page()));
+        cx.notify();
+    }
+
+    /// Pastes the clipboard's text into a field, as the paste key does there, and gives the
+    /// field the keys again.
+    fn paste_into(&mut self, field: Field, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        let field = self.field(field).clone();
+        field.focus_handle(cx).focus(window, cx);
+        field.update(cx, |field, cx| field.paste_clipboard(window, cx));
+        cx.notify();
     }
 
     /// Bars a student from the user's attacks (編成NG) or lets the student back in (see
@@ -907,11 +985,15 @@ impl Rio {
         self.taken_away(gone, cx);
     }
 
-    /// The menu open, where it was asked for: what it is of (a student's name), and the
-    /// one thing to do. A press beside it closes it.
+    /// The menu open, where it was asked for: what it is of (a student's name, a field's),
+    /// and the one thing to do. A press beside it closes it. What cannot be done (to paste
+    /// while the clipboard holds no text) is in muted words and takes no press: the hover
+    /// says what is missing. The tests find the one as `menu:<label>`, the other as
+    /// `menu-off:<label>`.
     fn student_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Another page opened without a press beside the menu (by the keys): the menu goes.
-        self.menu = (self.menu).filter(|(_, _, page)| *page == (self.tab, self.settings_open));
+        let page = self.page();
+        self.menu = (self.menu).filter(|(_, _, of)| *of == page);
         let (asked, at, _) = self.menu?;
         let barred =
             matches!(asked, Asked::Student(student) if self.shown.barred.contains(&student));
@@ -919,27 +1001,40 @@ impl Rio {
             Asked::Student(student) if barred => (name_of(&self.names, student), "編成NGを外す"),
             Asked::Student(student) => (name_of(&self.names, student), "編成NG"),
             Asked::Registered(..) => ("登録した編成".to_owned(), "登録を消す"),
+            Asked::Field(field, _) => (field.name().to_owned(), "貼り付け"),
         };
+        let missing =
+            matches!(asked, Asked::Field(_, false)).then_some("クリップボードに文字がありません。");
         let hover = theme.wash_base;
         let item = div()
             .id("student-menu-bar")
-            .debug_selector(move || format!("menu:{label}"))
             .role(gpui::Role::MenuItem)
             .aria_label(label)
-            .tab_stop(true)
             .flex()
             .items_center()
             .h(px(30.))
             .px(SP_3)
             .text_size(FS_SM)
-            .cursor_pointer()
-            .hover(move |s| s.bg(hover))
-            .focus(move |s| s.bg(hover))
-            .child(label)
-            .on_click(cx.listener(move |this, _, _, cx| match asked {
-                Asked::Student(student) => this.bar(student, !barred, cx),
-                Asked::Registered(attack, defense) => this.unregister(attack, defense, cx),
-            }));
+            .child(label);
+        let item = match missing {
+            Some(missing) => item
+                .debug_selector(move || format!("menu-off:{label}"))
+                .aria_description(missing)
+                .tooltip(widgets::tooltip(missing))
+                .text_color(theme.muted)
+                .cursor_default(),
+            None => item
+                .debug_selector(move || format!("menu:{label}"))
+                .tab_stop(true)
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .focus(move |s| s.bg(hover))
+                .on_click(cx.listener(move |this, _, window, cx| match asked {
+                    Asked::Student(student) => this.bar(student, !barred, cx),
+                    Asked::Registered(attack, defense) => this.unregister(attack, defense, cx),
+                    Asked::Field(field, _) => this.paste_into(field, window, cx),
+                })),
+        };
         let menu = div()
             .id("student-menu")
             .debug_selector(|| "student-menu".to_owned())

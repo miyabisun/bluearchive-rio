@@ -61,6 +61,42 @@ pub fn record(battles: &str, wins: &str) -> Result<Option<Reported>, Unkept> {
     told.map(Some).ok_or(Unkept)
 }
 
+/// A field of the record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Figure {
+    Battles,
+    Wins,
+}
+
+/// What the two fields hold after a step in one of them, `up` or down (the arrow keys): a
+/// battle more or less, a battle at least and `MOST` at most; a win more or less, none at
+/// least and no more than the battles. A field that tells no number holds one after a step
+/// in it. The other field is left as it is, but for more wins than the battles stepped
+/// down to: those go down with them.
+pub fn stepped(battles: &str, wins: &str, of: Figure, up: bool) -> (String, String) {
+    let number = |typed: &str| typed.trim().parse::<u32>().ok();
+    let step = |from: Option<u32>| match from {
+        Some(from) if up => from.saturating_add(1),
+        Some(from) => from.saturating_sub(1),
+        None => 1,
+    };
+    let (fought, won) = (number(battles), number(wins));
+    match of {
+        Figure::Battles => {
+            let fought = step(fought).clamp(1, MOST);
+            let wins = match won {
+                Some(won) if won > fought => fought.to_string(),
+                _ => wins.to_owned(),
+            };
+            (fought.to_string(), wins)
+        }
+        Figure::Wins => {
+            let won = step(won).min(fought.unwrap_or(MOST));
+            (battles.to_owned(), won.to_string())
+        }
+    }
+}
+
 /// The page a field tells, without the spaces around it: none while it is empty; `Unkept`
 /// for what is no address of the web.
 pub fn page(typed: &str) -> Result<Option<String>, Unkept> {
@@ -91,7 +127,7 @@ pub fn of_web(url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{MOST, Reported, Unkept, figures, of_web, page, record};
+    use super::{Figure, MOST, Reported, Unkept, figures, of_web, page, record, stepped};
 
     #[test]
     fn a_record_has_a_battle_at_least_and_no_more_wins_than_battles() {
@@ -134,6 +170,72 @@ mod tests {
         assert_eq!(record("0", "0"), Err(Unkept), "no battle");
         assert_eq!(record("二十", "18"), Err(Unkept), "no number");
         assert_eq!(record("-3", "1"), Err(Unkept));
+    }
+
+    fn both(battles: &str, wins: &str) -> (String, String) {
+        (battles.to_owned(), wins.to_owned())
+    }
+
+    #[test]
+    fn a_step_in_the_battles_stays_a_record_and_takes_the_wins_along() {
+        let (up, down) = (true, false);
+        assert_eq!(stepped("1", "1", Figure::Battles, up), both("2", "1"));
+        assert_eq!(stepped("20", "18", Figure::Battles, down), both("19", "18"));
+        assert_eq!(
+            stepped("5", "5", Figure::Battles, down),
+            both("4", "4"),
+            "no more wins than battles are left"
+        );
+        assert_eq!(
+            stepped("1", "1", Figure::Battles, down),
+            both("1", "1"),
+            "a battle at least"
+        );
+        assert_eq!(stepped("1", "0", Figure::Battles, down), both("1", "0"));
+        let most = MOST.to_string();
+        assert_eq!(
+            stepped(&most, "3", Figure::Battles, up),
+            both(&most, "3"),
+            "as many as a field takes at most"
+        );
+        // What was typed told no record: a step leaves one.
+        assert_eq!(stepped("0", "0", Figure::Battles, down), both("1", "0"));
+        assert_eq!(stepped("3", "5", Figure::Battles, up), both("4", "4"));
+    }
+
+    #[test]
+    fn a_step_in_the_wins_stays_within_the_battles() {
+        let (up, down) = (true, false);
+        assert_eq!(stepped("20", "17", Figure::Wins, up), both("20", "18"));
+        assert_eq!(stepped("20", "18", Figure::Wins, down), both("20", "17"));
+        assert_eq!(
+            stepped("1", "1", Figure::Wins, up),
+            both("1", "1"),
+            "no more wins than battles"
+        );
+        assert_eq!(
+            stepped("2", "0", Figure::Wins, down),
+            both("2", "0"),
+            "no less than none"
+        );
+        assert_eq!(stepped("3", "5", Figure::Wins, up), both("3", "3"));
+    }
+
+    #[test]
+    fn a_step_in_an_empty_field_makes_it_one_and_leaves_the_other_empty() {
+        for up in [true, false] {
+            assert_eq!(stepped("", "", Figure::Battles, up), both("1", ""), "{up}");
+            assert_eq!(stepped("", "", Figure::Wins, up), both("", "1"), "{up}");
+            assert_eq!(
+                stepped("", "3", Figure::Battles, up),
+                both("1", "1"),
+                "{up}"
+            );
+            assert_eq!(stepped("20", "", Figure::Wins, up), both("20", "1"), "{up}");
+        }
+        // The other field stays empty while the one stepped in tells a number.
+        assert_eq!(stepped("20", "", Figure::Battles, true), both("21", ""));
+        assert_eq!(stepped("20", "", Figure::Battles, false), both("19", ""));
     }
 
     #[test]
