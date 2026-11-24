@@ -3,7 +3,7 @@
 //! it (`Overlay`, on Windows). The game is only covered: nothing is sent to it.
 
 use image::{
-    Rgba, RgbaImage,
+    GrayImage, Rgba, RgbaImage,
     imageops::{self, FilterType},
 };
 
@@ -43,6 +43,23 @@ const WORDS: [&[u8]; 6] = [
     include_bytes!("../data/words/unread.png"),
     include_bytes!("../data/words/reopen.png"),
 ];
+
+/// The digits and the unit the rows to a student sought are written with (`data/words`,
+/// drawn by `make_refs`), and how tall they stand at the foot of the student's icon.
+const DIGITS: [&[u8]; 10] = [
+    include_bytes!("../data/words/digit-0.png"),
+    include_bytes!("../data/words/digit-1.png"),
+    include_bytes!("../data/words/digit-2.png"),
+    include_bytes!("../data/words/digit-3.png"),
+    include_bytes!("../data/words/digit-4.png"),
+    include_bytes!("../data/words/digit-5.png"),
+    include_bytes!("../data/words/digit-6.png"),
+    include_bytes!("../data/words/digit-7.png"),
+    include_bytes!("../data/words/digit-8.png"),
+    include_bytes!("../data/words/digit-9.png"),
+];
+const ROWS_UNIT: &[u8] = include_bytes!("../data/words/rows.png");
+const ROWS_TALL: f32 = 38.0;
 
 struct Canvas {
     picture: RgbaImage,
@@ -128,16 +145,54 @@ impl Canvas {
         let right = at.0 + room * 2.0 + wide as f32 / self.scale;
         self.fill((at.0, top, right, top + tall), ground);
         let (left, top, _, _) = self.pixels((at.0 + room, top, right, top + tall));
+        self.ink(&letters, left, top);
+    }
+
+    /// Letters in white over what the picture holds, as much as each pixel of `letters`
+    /// covers, their top left corner at the picture's pixel (`left`, `top`).
+    fn ink(&mut self, letters: &GrayImage, left: u32, top: u32) {
         for (x, y, cover) in letters.enumerate_pixels() {
             let (x, y) = (left + x, top + y);
             if x < self.picture.width() && y < self.picture.height() {
                 let cover = u32::from(cover.0[0]);
                 let pixel = self.picture.get_pixel_mut(x, y);
-                // White over the ground, as much as the letter covers.
                 pixel.0 = pixel
                     .0
                     .map(|colour| ((u32::from(colour) * (255 - cover) + 255 * cover) / 255) as u8);
             }
+        }
+    }
+
+    /// How many rows away a sought student is: the number and its unit on the dark ground,
+    /// over the foot of the student's icon about `middle`, as wide as the icon.
+    fn rows(&mut self, rows: u8, middle: (f32, f32)) {
+        let half = SEEK_SIDE / 2.0;
+        let foot = middle.1 + half;
+        let strip = (middle.0 - half, foot - ROWS_TALL, middle.0 + half, foot);
+        let digits = rows.to_string();
+        let pictures = digits
+            .bytes()
+            .map(|digit| DIGITS[usize::from(digit - b'0')])
+            .chain([ROWS_UNIT]);
+        let mut letters = Vec::new();
+        for picture in pictures {
+            let Ok(picture) = image::load_from_memory(picture) else {
+                return;
+            };
+            let picture = picture.to_luma8();
+            // Each picture's height is the strip's.
+            let drawn = ROWS_TALL * self.scale / picture.height() as f32;
+            let wide = (picture.width() as f32 * drawn).round().max(1.0) as u32;
+            let high = (picture.height() as f32 * drawn).round().max(1.0) as u32;
+            letters.push(imageops::resize(&picture, wide, high, FilterType::Triangle));
+        }
+        self.fill(strip, GROUND);
+        let (left, top, right, _) = self.pixels(strip);
+        let wide: u32 = letters.iter().map(GrayImage::width).sum();
+        let mut left = left + (right - left).saturating_sub(wide) / 2;
+        for letters in &letters {
+            self.ink(letters, left, top);
+            left += letters.width();
         }
     }
 
@@ -210,6 +265,7 @@ pub fn draw(marks: &[Mark], width: u32, height: u32) -> RgbaImage {
                     canvas.arrow((middle.0, middle.1 + reach), false);
                 }
             }
+            Mark::Rows { rows, middle } => canvas.rows(rows, middle),
             Mark::Say { words, at, tall } => canvas.say(words, at, tall),
         }
     }
@@ -436,8 +492,8 @@ mod window {
 
 #[cfg(test)]
 mod tests {
-    use super::{GUESS, PICK, draw};
-    use crate::guide::{Mark, Words};
+    use super::{GROUND, GUESS, PICK, draw};
+    use crate::guide::{Mark, Way, Words};
 
     const CARD: Mark = Mark::Pick((1000.0, 400.0, 1200.0, 600.0));
 
@@ -485,6 +541,53 @@ mod tests {
             "the icon covers the \"?\""
         );
         assert_eq!(picture.get_pixel(365, 700).0[3], 0, "nothing above");
+    }
+
+    /// The rows to a student sought stand at the foot of its icon: white letters on the
+    /// dark ground, the icon above them as it was.
+    #[test]
+    fn the_rows_to_a_student_are_written_at_the_foot_of_its_icon() {
+        let middle = (2232.0, 918.0);
+        let seek = Mark::Seek {
+            student: 10005,
+            way: Way::Down,
+            middle,
+        };
+        let with = |rows| draw(&[seek, Mark::Rows { rows, middle }], 2370, 1333);
+        let (plain, two) = (draw(&[seek], 2370, 1333), with(2));
+        // The icon is 100 a side about its middle; the letters' strip is its lowest 38 rows.
+        let white = |picture: &image::RgbaImage| {
+            let strip = (2182..2282).flat_map(|x| (930..968).map(move |y| (x, y)));
+            strip
+                .filter(|&(x, y)| picture.get_pixel(x, y).0 == [255; 4])
+                .count()
+        };
+        assert_eq!(two.get_pixel(2184, 932), &GROUND, "the strip's ground");
+        assert_eq!(two.get_pixel(2279, 966), &GROUND, "as wide as the icon");
+        assert!(white(&two) > 60, "letters: {} white pixels", white(&two));
+        assert_eq!(
+            two.get_pixel(2232, 900),
+            plain.get_pixel(2232, 900),
+            "the icon above the strip stays"
+        );
+        assert_eq!(
+            two.get_pixel(2232, 1000),
+            plain.get_pixel(2232, 1000),
+            "the arrow below stays"
+        );
+        // Another number is other letters; two digits take more room and still fit.
+        assert_ne!(two, with(3));
+        let twelve = with(12);
+        assert!(white(&twelve) > white(&two));
+        assert_eq!(
+            twelve.get_pixel(2184, 932),
+            &GROUND,
+            "room left of two digits"
+        );
+        // A smaller window draws them smaller, at the icon's foot there.
+        let small = draw(&[seek, Mark::Rows { rows: 2, middle }], 1920, 1080);
+        assert_ne!(small.get_pixel(1808, 744).0[3], 0, "the icon's place");
+        assert_eq!(small.get_pixel(1770, 756), &GROUND, "the strip's ground");
     }
 
     /// Words beside a record's title, and at a row's button.

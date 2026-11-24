@@ -341,19 +341,16 @@ fn run(
     chosen: &Mutex<Option<Choice>>,
     report: &dyn Fn(Status, Option<Update>),
 ) -> Result<(), String> {
-    use std::{
-        collections::HashMap,
-        sync::{
-            PoisonError,
-            atomic::Ordering,
-            mpsc::{RecvTimeoutError, channel},
-        },
+    use std::sync::{
+        PoisonError,
+        atomic::Ordering,
+        mpsc::{RecvTimeoutError, channel},
     };
 
     use crate::{
         aoi,
         capture::{self, Seen, Shot},
-        guide::{self, Rank, Visit, Words},
+        guide::{self, Visit, Words},
         history::{self, Battle, Reader, Steady},
         listing::{Shows, Up},
         opponent,
@@ -398,10 +395,10 @@ fn run(
     // without the name.
     let mut met: Option<(Front, Option<Plate>)> = None;
     let mut counselled: Option<Opponent> = None;
-    // The ranks of the students held, as Aoi wrote them when the opponent came up; the
+    // The roll of the students held, as Aoi wrote them when the opponent came up; the
     // snapshot's students give their schools and names.
     let students = crate::students();
-    let mut ranks: HashMap<i64, Rank> = HashMap::new();
+    let mut roll = guide::Roll::default();
     // The list of records: how long it is up, and what it told from frame to frame.
     let mut up = Up::default();
     let mut listing = Listing::default();
@@ -557,7 +554,7 @@ fn run(
             };
             if !counselled.as_ref().is_some_and(same) {
                 let held = aoi::held().ok();
-                ranks = guide::ranked(held.as_deref().unwrap_or_default(), &students);
+                roll = guide::roll(held.as_deref().unwrap_or_default(), &students);
                 let counsel = store
                     .counsel(&front, name.as_ref(), clock())
                     .map_err(records)?;
@@ -581,7 +578,7 @@ fn run(
                         behind,
                         choice.and_then(|choice| choice.attack),
                         visit.enter(&shown.placed, now),
-                        &ranks,
+                        &roll,
                     ),
                     None => behind.map_or_else(Vec::new, guide::for_opponent),
                 };

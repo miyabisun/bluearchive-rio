@@ -67,12 +67,34 @@ const COLUMN: f32 = 1144.0;
 const COLUMN_STEP: f32 = 205.7;
 const ROW_STEP: f32 = 282.0;
 const CARD_SIDE: f32 = 147.0;
+/// The cards of a row.
+pub(crate) const COLUMNS: usize = 6;
+/// How far off its column or its row a card's middle may lie and still be of the grid.
+const OFF_GRID: f32 = 0.25;
+
+/// Where a card lies in the list's grid: how many rows below the row of `first` (a card
+/// not below it), and its column, the first 0. `None` for a middle that lies on no column
+/// or row of the grid.
+pub(crate) fn seat(card: &Card, first: &Card) -> Option<(usize, usize)> {
+    let column = (card.middle.0 - COLUMN) / COLUMN_STEP;
+    let row = (card.middle.1 - first.middle.1) / ROW_STEP;
+    let on_grid = |at: f32| at > -OFF_GRID && (at - at.round()).abs() <= OFF_GRID;
+    (on_grid(column) && on_grid(row) && (column.round() as usize) < COLUMNS)
+        .then(|| (row.round() as usize, column.round() as usize))
+}
 /// A card's name stands on a navy label under its icon: `LABEL_TALL` tall, its top
 /// `LABEL_BELOW` under the icon's middle. `LABEL_X` crosses the first column's labels left
-/// of any letter.
-const LABEL_X: f32 = 1080.0;
+/// of any letter: a name of two lines begins at 1080 (it broke the label in two there, and
+/// the screen was not read: 2026-11-24, real screens scrolled), the label's slanted edge
+/// ends at 1066.
+const LABEL_X: f32 = 1074.0;
 const LABEL_TALL: f32 = 66.0;
 const LABEL_BELOW: f32 = 96.0;
+/// The list's own top edge lies this far below `LIST.0` at most: a label that starts
+/// there is cut by it. Measured on 2026-11-24 over 32 real screens: cut labels start 12
+/// or 13 below `LIST.0` (one showed 61 of its 68 rows and was taken for whole), whole
+/// ones 17 or more.
+const LIST_EDGE: f32 = 15.0;
 /// A card around its icon's middle: to the sides, above and below.
 pub(crate) const CARD_AROUND: (f32, f32, f32) = (98.0, 90.0, 178.0);
 /// The rows of an icon the list must show for it to be read: `CARD_ROWS` of it with the
@@ -110,15 +132,17 @@ fn open(filled: [f32; 2]) -> Option<Tab> {
 
 /// Where a label starts in a column of the list's pixels, `navy` or not: the first run of
 /// navy as tall as a label (`tall` pixels) that the list shows whole. Something else navy,
-/// or a label cut by the list's edge, is another height.
+/// or a label cut by the list's foot, is another height; one that starts at the list's top
+/// edge is cut there, however much of it shows.
 fn label_top(navy: &[bool], tall: f32) -> Option<usize> {
     let slack = (tall / 10.0).max(2.0);
+    let edge = tall * LIST_EDGE / LABEL_TALL;
     let mut start = None;
     for (at, &inked) in navy.iter().enumerate() {
         match (start, inked) {
             (None, true) => start = Some(at),
             (Some(from), false) => {
-                if from > 0 && ((at - from) as f32 - tall).abs() <= slack {
+                if from as f32 > edge && ((at - from) as f32 - tall).abs() <= slack {
                     return Some(from);
                 }
                 start = None;
@@ -185,7 +209,7 @@ impl Reader {
         };
         let mut cards = Vec::new();
         for row in rows(label) {
-            for column in 0..6 {
+            for column in 0..COLUMNS {
                 let middle = (COLUMN + column as f32 * COLUMN_STEP, row);
                 if let Some(student) = face(middle, CARD_SIDE, squad) {
                     cards.push(Card { student, middle });
@@ -203,7 +227,7 @@ impl Reader {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tab, label_top, open, rows};
+    use super::{Card, Tab, label_top, open, rows, seat};
 
     #[test]
     fn the_open_tab_is_the_one_filled() {
@@ -241,6 +265,55 @@ mod tests {
         );
         // A smaller window draws a smaller label.
         assert_eq!(label_top(&column(&[(120, 162)]), 41.8), Some(120));
+        // The list's own top edge lies 13 below where the column starts: a label that
+        // starts there is cut, though 61 of its 68 rows show (2026-11-24, a real screen).
+        assert_eq!(
+            label_top(&column(&[(13, 74), (288, 356)]), 66.0),
+            Some(288),
+            "cut by the list's edge"
+        );
+        assert_eq!(
+            label_top(&column(&[(17, 85)]), 66.0),
+            Some(17),
+            "whole, right under the edge"
+        );
+    }
+
+    /// A card's seat is its column and its row below the first card's, wherever the list
+    /// was scrolled to; a middle between two columns or rows is on no seat.
+    #[test]
+    fn a_card_has_its_seat_in_the_grid() {
+        let card = |x: f32, y: f32| Card {
+            student: 1,
+            middle: (x, y),
+        };
+        let first = card(1144.0, 584.0);
+        assert_eq!(seat(&first, &first), Some((0, 0)));
+        assert_eq!(seat(&card(2172.5, 584.0), &first), Some((0, 5)));
+        assert_eq!(seat(&card(1349.7, 866.0), &first), Some((1, 1)));
+        // Drawn a little off, as a smaller window rounds it.
+        assert_eq!(seat(&card(1352.0, 869.0), &first), Some((1, 1)));
+        assert_eq!(
+            seat(&card(1247.0, 584.0), &first),
+            None,
+            "between two columns"
+        );
+        assert_eq!(seat(&card(1144.0, 725.0), &first), None, "between two rows");
+        assert_eq!(
+            seat(&card(938.0, 584.0), &first),
+            None,
+            "left of the first column"
+        );
+        assert_eq!(
+            seat(&card(2378.0, 584.0), &first),
+            None,
+            "past the last column"
+        );
+        assert_eq!(
+            seat(&first, &card(1144.0, 866.0)),
+            None,
+            "above the first card"
+        );
     }
 
     #[test]

@@ -22,7 +22,7 @@
 
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont, point};
 use bluearchive_rio::{
-    guide::Words,
+    guide::{ROWS_UNIT, Words},
     history::{digit_cells, icon_shape, role_shape, title_shape},
     list::{self, DIGIT_SIZE, DIGIT_WIDE, KANJI, KANJI_SIZE},
     opponent,
@@ -331,5 +331,13 @@ fn main() {
                 &format!("words/{}", said.name()),
             );
         }
+        // The digits and the unit the rows to a student sought are written with.
+        for digit in 0..10 {
+            save(
+                Some(words(&font, &digit.to_string())),
+                &format!("words/digit-{digit}"),
+            );
+        }
+        save(Some(words(&font, ROWS_UNIT)), "words/rows");
     }
 }
