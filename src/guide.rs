@@ -314,14 +314,15 @@ const SEEK_UP: (f32, f32) = (2232.0, 455.0);
 const SEEK_DOWN: (f32, f32) = (2232.0, 918.0);
 
 /// The way to a student the list does not show, from the cards it shows (in its order),
-/// the students placed when the dialog opened and the students' ranks.
-pub fn way(student: i64, cards: &[i64], entered: &[i64], rank: &HashMap<i64, Rank>) -> Way {
-    // The students entered with stand first: one of them out of sight is above, and with
-    // one of them in sight the list is at its top.
-    if entered.contains(&student) {
+/// the students known to stand `first` in it (those placed when the dialog opened, see
+/// `Lead`) and the students' ranks.
+pub fn way(student: i64, cards: &[i64], first: &[i64], rank: &HashMap<i64, Rank>) -> Way {
+    // One of those standing first out of sight is above, and with one of them in sight
+    // the list is at its top.
+    if first.contains(&student) {
         return Way::Up;
     }
-    if cards.iter().any(|card| entered.contains(card)) {
+    if cards.iter().any(|card| first.contains(card)) {
         return Way::Down;
     }
     let of = |student: Option<&i64>| student.and_then(|student| rank.get(student));
@@ -373,155 +374,323 @@ pub fn roll(held: &[Held], students: &[Student]) -> Roll {
 /// from the first column of the first row in sight (the row times `COLUMNS`, and the column).
 pub type Seat = (i64, usize);
 
+/// The seats of the cards the dialog shows; none where a card lies off the list's grid.
+pub fn seated(shown: &Formation) -> Option<Vec<Seat>> {
+    let first = shown.cards.first();
+    shown
+        .cards
+        .iter()
+        .map(|card| {
+            let (row, column) = seat(card, first?)?;
+            Some((card.student, row * COLUMNS + column))
+        })
+        .collect()
+}
+
+/// What is known of the students a tab's list shows first, whatever their ranks: those of
+/// the team as it stood when the dialog opened. `known` are the ones known to stand there,
+/// `whole` tells that they are all of them. They are all known where Rio saw the dialog
+/// open, or read the list's top since (`opened_with`); else none is (see `Visit`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Lead {
+    pub known: Vec<i64>,
+    pub whole: bool,
+}
+
+impl Lead {
+    /// These, and no other.
+    pub fn all(known: &[i64]) -> Self {
+        Self {
+            known: known.to_vec(),
+            whole: true,
+        }
+    }
+}
+
+/// How many students a tab's list shows first at most: the team's places of its squad.
+fn most(tab: Tab) -> usize {
+    match tab {
+        Tab::Striker => 4,
+        Tab::Special => 2,
+    }
+}
+
+fn before(rank: &Rank, of: &Rank) -> bool {
+    rank.against(of) == Some(Ordering::Less)
+}
+
+fn after(rank: &Rank, of: &Rank) -> bool {
+    rank.against(of) == Some(Ordering::Greater)
+}
+
+/// The cards in sight, read as a stretch of a tab's list: the students standing first
+/// (those the dialog opened with, in an order not known), then the others by their ranks.
+/// A student standing first is missing at its rank's place, so each of the others stands
+/// as many places on from its rank's as students standing first rank after it. A card's
+/// column tells that count (four at most, in rows of six): measured on 2026-11-24, where
+/// three of a team of four ranked after the twelve cards in sight and every card stood
+/// three places on.
+struct Stretch<'a> {
+    /// How many students are known to stand first, and how many more may.
+    first: usize,
+    spare: usize,
+    /// How many of those known are in sight: none, or all of them from the first place on.
+    leading: usize,
+    /// The others' cards in sight: each one's seat and rank.
+    others: Vec<(usize, &'a Rank)>,
+    /// The ranks of the others out of sight, but the student sought.
+    unseen: Vec<&'a Rank>,
+    /// For each two neighbours of `others`, the students out of sight whose ranks are
+    /// between theirs, beyond the places open between the two cards: they stand first.
+    gone: Vec<usize>,
+}
+
+impl<'a> Stretch<'a> {
+    /// The cards at `seats` as a stretch of the list of `tab`, looked at for the student
+    /// `sought`. `None` where they are none:
+    /// - not every student held has a rank, or a card's student has none;
+    /// - the cards of those known to stand first are in sight, but not all of them from
+    ///   the list's first place on, side by side up to the first of the others, with no
+    ///   student out of sight ranking before that one;
+    /// - two of the others stand against their ranks, or the ranks do not put as many
+    ///   students between them as places are open there (none between cards side by side;
+    ///   a card not read leaves its place open), or do not tell how many; students beyond
+    ///   the open places stand first, as far as more may than are known.
+    fn read(
+        sought: Option<i64>,
+        seats: &[Seat],
+        lead: &Lead,
+        tab: Tab,
+        roll: &'a Roll,
+    ) -> Option<Self> {
+        let start = seats.first()?.1;
+        if !roll.whole || seats.windows(2).any(|pair| pair[1].1 <= pair[0].1) {
+            return None;
+        }
+        let of_tab = |id: &i64| (tab == Tab::Special) == roll.specials.contains(id);
+        let known: Vec<i64> = lead.known.iter().copied().filter(of_tab).collect();
+        let spare = match lead.whole {
+            true => 0,
+            false => most(tab).checked_sub(known.len())?,
+        };
+        let seen = |id: &i64| seats.iter().any(|seat| seat.0 == *id);
+        let other = |id: &i64| of_tab(id) && !known.contains(id);
+        let unseen: Vec<&Rank> = roll
+            .ranks
+            .iter()
+            .filter(|(id, _)| other(id) && !seen(id) && Some(**id) != sought)
+            .map(|(_, rank)| rank)
+            .collect();
+
+        let leading = seats
+            .iter()
+            .take_while(|seat| known.contains(&seat.0))
+            .count();
+        if leading > 0 && (!lead.whole || leading != known.len() || start != 0) {
+            return None;
+        }
+        let side_by_side = |pair: &[Seat]| pair[1].1 == pair[0].1 + 1;
+        if !seats[..(leading + 1).min(seats.len())]
+            .windows(2)
+            .all(side_by_side)
+        {
+            return None;
+        }
+        let mut others = Vec::with_capacity(seats.len() - leading);
+        for seat in &seats[leading..] {
+            let rank = roll.ranks.get(&seat.0).filter(|_| other(&seat.0))?;
+            others.push((seat.1, rank));
+        }
+        let mut gone = Vec::with_capacity(others.len());
+        for pair in others.windows(2) {
+            let ((place, card), (next_place, next)) = (pair[0], pair[1]);
+            let open = next_place - place - 1;
+            let between = |rank: &&&Rank| after(rank, card) && before(rank, next);
+            let maybe = |rank: &&&Rank| !before(rank, card) && !after(rank, next);
+            let surely = unseen.iter().filter(between).count();
+            let may = unseen.iter().filter(maybe).count();
+            if after(card, next) || surely < open || (surely > 0 && may != surely) {
+                return None;
+            }
+            gone.push(surely - open);
+        }
+        if gone.iter().sum::<usize>() > spare {
+            return None;
+        }
+        if let (true, Some(&(_, card))) = (leading > 0, others.first())
+            && unseen.iter().any(|rank| before(rank, card))
+        {
+            return None;
+        }
+        Some(Self {
+            first: known.len(),
+            spare,
+            leading,
+            others,
+            unseen,
+            gone,
+        })
+    }
+
+    /// How many of the students out of sight stand where `sure` tells for sure, and how
+    /// many may stand there.
+    fn count(&self, sure: impl Fn(&Rank) -> bool, may: impl Fn(&Rank) -> bool) -> (usize, usize) {
+        let surely = self.unseen.iter().filter(|rank| sure(rank)).count();
+        (surely, self.unseen.iter().filter(|rank| may(rank)).count())
+    }
+
+    /// The students standing first, not known and out of sight, who rank after the other
+    /// at `index`, as its card's column tells: the card's place in the whole list is the
+    /// count of those known to stand first, of the others before it (those in sight, the
+    /// `sought` one if it stands before, and those out of sight the ranks put there), and
+    /// of these. `Some(None)` where the ranks leave open how many stand before it; `None`
+    /// where the column would have more stand first than may.
+    fn over(&self, index: usize, sought: usize) -> Option<Option<usize>> {
+        let (place, card) = self.others[index];
+        let (surely, may) = self.count(|rank| before(rank, card), |rank| !after(rank, card));
+        if surely != may {
+            return Some(None);
+        }
+        let ahead = self.first + index + sought + surely;
+        let over = (place + COLUMNS - ahead % COLUMNS) % COLUMNS;
+        (over <= self.spare).then_some(Some(over))
+    }
+
+    /// Those of `over` for the last of the others. Every card whose place the ranks tell
+    /// must tell the same, and one at least must; where all standing first are known,
+    /// the card at `index` alone is asked, and it may leave its place open.
+    fn over_last(&self, index: usize, sought: usize) -> Option<usize> {
+        if self.spare == 0 {
+            return self.over(index, sought).map(|_| 0);
+        }
+        let mut told = None;
+        for at in 0..self.others.len() {
+            if let Some(over) = self.over(at, sought)? {
+                let last = over.checked_sub(self.gone[at..].iter().sum())?;
+                if told.is_some_and(|told| told != last) {
+                    return None;
+                }
+                told = Some(last);
+            }
+        }
+        told
+    }
+
+    /// Those of `over` for the first of the others: the last one's, and those who rank
+    /// between two cards in sight.
+    fn over_first(&self, sought: usize) -> Option<usize> {
+        let over = self.over_last(0, sought)? + self.gone.iter().sum::<usize>();
+        (over <= self.spare).then_some(over)
+    }
+}
+
 /// How many rows the list is to be scrolled for `student`, whom it does not show: the rows
 /// from the last row in sight down to the student's (`Way::Down`), or from the first up to
 /// it (`Way::Up`); the row next to the one in sight is 1.
 ///
-/// The list of a tab shows the students of its squad: those entered with first (in an
-/// order not known, all in the first row), then the others by their ranks. The cards in
-/// sight are taken for a stretch of that list, and the student's place is counted from
-/// the card at its end. `None` wherever that count is not sure:
-/// - the way is not told, the student has no rank, or not every student held has one;
-/// - the cards in sight are not that stretch: the ranks do not put as many students
-///   between two cards as places are open between them (none between cards side by
-///   side; a card not read leaves its place open), they put the end card in another
-///   column than the screen does, or a card's student has no rank;
-/// - students the ranks do not order against the student or the end card would stand in
-///   one row by one count and in the next by another.
+/// The cards in sight are taken for a stretch of the tab's list (see `Stretch`), and the
+/// student's place is counted from the card at its end. Where not all standing first are
+/// known (`lead`), the student sought is taken for one of the others unless known to stand
+/// first, and the count allows for those who may: of the students the ranks put between
+/// the end card and the student, as many may be missing as stand first by the card's
+/// column (downwards: those ranking after the last card; upwards: those the team has
+/// places left for). `None` wherever the count is not sure:
+/// - the way is not told, the student has no rank, or the cards are no stretch of the list;
+/// - the end card stands in another column than its place in the list has (told from the
+///   ranks where all standing first are known, else it tells how many do);
+/// - by one count the student stands in one row and by another in the next: students the
+///   ranks do not order against it or the end card, or who may stand first.
 pub fn rows_to(
     student: i64,
     way: Way,
     seats: &[Seat],
-    entered: &[i64],
+    lead: &Lead,
     tab: Tab,
     roll: &Roll,
 ) -> Option<u8> {
-    let (&(_, start), &(_, end)) = (seats.first()?, seats.last()?);
-    if !roll.whole || seats.windows(2).any(|pair| pair[1].1 <= pair[0].1) {
-        return None;
-    }
-    let of_tab = |id: &i64| (tab == Tab::Special) == roll.specials.contains(id);
-    let lead: Vec<i64> = entered.iter().copied().filter(of_tab).collect();
-    let seen = |id: &i64| seats.iter().any(|seat| seat.0 == *id);
-    // The others of the tab, and those of them out of sight.
-    let other = |id: &i64| of_tab(id) && !lead.contains(id);
-    let rank = |id: i64| roll.ranks.get(&id).filter(|_| other(&id));
-    let unseen: Vec<&Rank> = roll
-        .ranks
-        .iter()
-        .filter(|(id, _)| other(id) && !seen(id) && **id != student)
-        .map(|(_, rank)| rank)
-        .collect();
-    // How many of the students out of sight stand where `sure` tells for sure, and how
-    // many may stand there.
-    let count = |sure: &dyn Fn(&Rank) -> bool, may: &dyn Fn(&Rank) -> bool| {
-        let surely = unseen.iter().filter(|rank| sure(rank)).count();
-        (surely, unseen.iter().filter(|rank| may(rank)).count())
-    };
-    let before = |rank: &Rank, of: &Rank| rank.against(of) == Some(Ordering::Less);
-    let after = |rank: &Rank, of: &Rank| rank.against(of) == Some(Ordering::Greater);
-
-    // The cards in sight: the team's first, all of them from the list's first place on,
-    // then the others, each with a rank and no student of the ranks between two.
-    let leading = seats
-        .iter()
-        .take_while(|seat| lead.contains(&seat.0))
-        .count();
-    let others = &seats[leading..];
-    if leading > 0 && (leading != lead.len() || start != 0) {
-        return None;
-    }
-    // The team's cards and the first of the others stand side by side.
-    let side_by_side = |pair: &[Seat]| pair[1].1 == pair[0].1 + 1;
-    if !seats[..(leading + 1).min(seats.len())]
-        .windows(2)
-        .all(side_by_side)
-    {
-        return None;
-    }
-    let mut ranks = Vec::with_capacity(others.len());
-    for seat in others {
-        ranks.push(rank(seat.0)?);
-    }
-    // Between two of the others the ranks put as many students out of sight as places
-    // are open between their cards (a card not read leaves its place open), for sure.
-    for (pair, places) in ranks.windows(2).zip(others.windows(2)) {
-        let open = places[1].1 - places[0].1 - 1;
-        let (surely, may) = count(
-            &|rank| after(rank, pair[0]) && before(rank, pair[1]),
-            &|rank| !before(rank, pair[0]) && !after(rank, pair[1]),
-        );
-        if after(pair[0], pair[1]) || surely != open || (open > 0 && may != open) {
-            return None;
-        }
-    }
-    // Right after the team's cards stands the first of the others.
-    if let (true, Some(&card)) = (leading > 0, ranks.first())
-        && unseen.iter().any(|rank| before(rank, card))
-    {
-        return None;
-    }
-    // The end card's place in the whole list, where the ranks tell it, lies in the column
-    // the screen shows the card in: the team's students, the `known` others before the
-    // card (those in sight, or the student sought) and those out of sight stand before it.
-    let column_fits = |card: &Rank, known: usize, place: usize| {
-        let (surely, may) = count(&|rank| before(rank, card), &|rank| !after(rank, card));
-        surely != may || (lead.len() + known + surely) % COLUMNS == place % COLUMNS
-    };
+    let stretch = Stretch::read(Some(student), seats, lead, tab, roll)?;
+    let (start, end) = (seats.first()?.1, seats.last()?.1);
     // The rows the two counts give, where they give the same and it is not the end row.
     let told = |rows: (usize, usize)| {
         (rows.0 == rows.1 && rows.0 > 0)
             .then(|| u8::try_from(rows.0).ok())
             .flatten()
     };
+    // The first card in sight, the first of its row, with every row above it full.
+    let top = || {
+        let first = stretch.others.first();
+        first.filter(|_| stretch.leading == 0 && start == 0)
+    };
+    let of_tab = (tab == Tab::Special) == roll.specials.contains(&student);
 
-    if lead.contains(&student) {
-        // The first row, from the first card in sight: every row above is full.
-        let card = *ranks.first().filter(|_| leading == 0 && start == 0)?;
-        if way != Way::Up || !column_fits(card, 0, start) {
+    if of_tab && lead.known.contains(&student) {
+        // The first row, from the first card in sight.
+        let &(_, card) = top()?;
+        if way != Way::Up {
             return None;
         }
-        let (surely, may) = count(&|rank| before(rank, card), &|rank| !after(rank, card));
-        return told((
-            (lead.len() + surely) / COLUMNS,
-            (lead.len() + may) / COLUMNS,
-        ));
+        let ahead = stretch.first + stretch.over_first(0)?;
+        let (surely, may) = stretch.count(|rank| before(rank, card), |rank| !after(rank, card));
+        return told(((ahead + surely) / COLUMNS, (ahead + may) / COLUMNS));
     }
-    let own = rank(student)?;
+    let own = roll.ranks.get(&student).filter(|_| of_tab)?;
     match way {
         Way::Down => {
             // From the last card in sight on, to the student's row.
-            let (surely, may) = match ranks.last() {
-                Some(&card) => {
-                    if before(own, card) || !column_fits(card, others.len() - 1, end) {
+            let (surely, may, over) = match stretch.others.last() {
+                Some(&(_, card)) => {
+                    if before(own, card) {
                         return None;
                     }
-                    count(&|rank| after(rank, card) && before(rank, own), &|rank| {
-                        !before(rank, card) && !after(rank, own)
-                    })
+                    let over = stretch.over_last(stretch.others.len() - 1, 0)?;
+                    let (surely, may) = stretch.count(
+                        |rank| after(rank, card) && before(rank, own),
+                        |rank| !before(rank, card) && !after(rank, own),
+                    );
+                    (surely, may, over)
                 }
-                // Only the team's cards in sight: every other student follows them.
-                None => count(&|rank| before(rank, own), &|rank| !after(rank, own)),
+                // Only the cards of those standing first in sight: every other follows.
+                None => {
+                    let (surely, may) =
+                        stretch.count(|rank| before(rank, own), |rank| !after(rank, own));
+                    (surely, may, 0)
+                }
             };
-            let column = end % COLUMNS;
-            told((
-                (column + surely + 1) / COLUMNS,
-                (column + may + 1) / COLUMNS,
-            ))
+            // Of the students between, those who stand first are not there.
+            let (column, least) = (end % COLUMNS, surely - over.min(surely));
+            told(((column + least + 1) / COLUMNS, (column + may + 1) / COLUMNS))
         }
         Way::Up => {
-            // Back from the first card in sight, the first of its row, over full rows.
-            let card = *ranks.first().filter(|_| leading == 0 && start == 0)?;
-            if after(own, card) || !column_fits(card, 1, start) {
+            // Back from the first card in sight, over full rows.
+            let &(_, card) = top()?;
+            if after(own, card) {
                 return None;
             }
-            let (surely, may) = count(&|rank| after(rank, own) && before(rank, card), &|rank| {
-                !before(rank, own) && !after(rank, card)
-            });
-            told(((surely + COLUMNS) / COLUMNS, (may + COLUMNS) / COLUMNS))
+            let over = stretch.over_first(1)?;
+            let (surely, may) = stretch.count(
+                |rank| after(rank, own) && before(rank, card),
+                |rank| !before(rank, own) && !after(rank, card),
+            );
+            let least = surely - (stretch.spare - over).min(surely);
+            told(((least + COLUMNS) / COLUMNS, (may + COLUMNS) / COLUMNS))
         }
         Way::Either => None,
     }
+}
+
+/// The students a tab's list shows first, read off its top: the fewest cards from the
+/// first place on (up to the team's places) after which the cards in sight are the others
+/// by their ranks, from the first of them all. `None` where the cards are not the list's
+/// top (a student out of sight may stand before the first of the others), or do not tell
+/// (a card among the first not read, cards against the ranks).
+pub fn opened_with(seats: &[Seat], tab: Tab, roll: &Roll) -> Option<Vec<i64>> {
+    (0..=most(tab)).find_map(|count| {
+        let first: Vec<i64> = seats.get(..count)?.iter().map(|seat| seat.0).collect();
+        let stretch = Stretch::read(None, seats, &Lead::all(&first), tab, roll)?;
+        let &(place, card) = stretch.others.first()?;
+        let follow = stretch.unseen.iter().all(|rank| after(rank, card));
+        (stretch.leading == count && place == count && follow).then_some(first)
+    })
 }
 
 fn guesses(behind: [i64; 3], middle: impl Fn(usize) -> (f32, f32), side: f32) -> Vec<Mark> {
@@ -565,13 +734,13 @@ fn next(wanted: &[i64], places: &[Option<i64>]) -> Option<i64> {
 /// The marks over the formation dialog: the strikers the user takes to stand behind the
 /// front, and for the `attack` chosen (A1 to A4, then the specials) the cards to take out of the
 /// team, the one student of the open tab to pick next (see `next`): the card, or out of
-/// sight the way to scroll (with how many rows away, where `roll` tells it for sure), and
-/// the other tab once this one is done.
+/// sight the way to scroll (with how many rows away, where `roll` and what is known of the
+/// `lead` of the tab's list tell it for sure), and the other tab once this one is done.
 pub fn for_formation(
     shown: &Formation,
     behind: Option<[i64; 3]>,
     attack: Option<[i64; 6]>,
-    entered: &[i64],
+    lead: &Lead,
     roll: &Roll,
 ) -> Vec<Mark> {
     let mut marks = behind.map_or_else(Vec::new, |behind| {
@@ -593,15 +762,7 @@ pub fn for_formation(
         Tab::Special => (specials, &shown.placed[4..], strikers, TABS[0]),
     };
     let in_sight: Vec<i64> = shown.cards.iter().map(|card| card.student).collect();
-    // The cards' places in the list's grid; none where a card lies off it.
-    let seats: Option<Vec<Seat>> = shown
-        .cards
-        .iter()
-        .map(|card| {
-            let (row, column) = seat(card, shown.cards.first()?)?;
-            Some((card.student, row * COLUMNS + column))
-        })
-        .collect();
+    let seats = seated(shown);
     let student = next(wanted, places);
     let card = student.and_then(|student| shown.cards.iter().find(|card| card.student == student));
     if let Some(card) = card {
@@ -613,7 +774,7 @@ pub fn for_formation(
             (y + down).min(LIST.1),
         )));
     } else if let Some(student) = student {
-        let way = way(student, &in_sight, entered, &roll.ranks);
+        let way = way(student, &in_sight, &lead.known, &roll.ranks);
         let middle = match way {
             Way::Up => SEEK_UP,
             Way::Down | Way::Either => SEEK_DOWN,
@@ -625,7 +786,7 @@ pub fn for_formation(
         });
         let rows = seats
             .as_deref()
-            .and_then(|seats| rows_to(student, way, seats, entered, shown.tab, roll));
+            .and_then(|seats| rows_to(student, way, seats, lead, shown.tab, roll));
         if let Some(rows) = rows {
             marks.push(Mark::Rows { rows, middle });
         }
@@ -636,25 +797,54 @@ pub fn for_formation(
     marks
 }
 
-/// The dialog is taken to have closed when it was not read for this long.
+/// The dialog is taken to have closed when it was not read for this long, and to have
+/// opened under Rio's eyes when frames without it were read for this long before it.
 const AWAY: Duration = Duration::from_secs(2);
 
-/// The team as it stood when the formation dialog opened: the list shows those students
-/// first, whatever is picked afterwards.
+/// What is known of the team as it stood when the formation dialog opened: each tab's
+/// list shows its students of that team first, whatever is picked afterwards. A dialog
+/// that Rio saw open has the team it showed then. One that was up before Rio looked
+/// (Rio started, or read nothing for a while) has a team not known: it is read off a
+/// tab's list once the list's top is in sight (`opened_with`), and until then the rows are
+/// counted with whoever may stand first (`rows_to`).
 #[derive(Default)]
 pub struct Visit {
-    entered: Vec<i64>,
+    /// The strikers' and the specials' of that team.
+    leads: [Lead; 2],
+    /// When the dialog was read last, and since when frames without it were read after.
     seen: Option<Instant>,
+    apart: Option<Instant>,
 }
 
 impl Visit {
-    /// The students placed when the dialog opened, given the team a reading shows `now`.
-    pub fn enter(&mut self, placed: &[Option<i64>; 6], now: Instant) -> &[i64] {
+    /// A frame read `now` does not show the dialog.
+    pub fn away(&mut self, now: Instant) {
+        self.apart.get_or_insert(now);
+    }
+
+    /// What is known of the students the open tab's list shows first, given a reading of
+    /// the dialog `now` and the roll its list is ordered by.
+    pub fn enter(&mut self, shown: &Formation, roll: &Roll, now: Instant) -> &Lead {
         if self.seen.is_none_or(|seen| now.duration_since(seen) > AWAY) {
-            self.entered = placed.iter().flatten().copied().collect();
+            let (strikers, specials) = shown.placed.split_at(4);
+            let team = |placed: &[Option<i64>]| {
+                Lead::all(&placed.iter().flatten().copied().collect::<Vec<_>>())
+            };
+            let opened = |since| now.duration_since(since) > AWAY;
+            self.leads = match self.apart.is_some_and(opened) {
+                true => [team(strikers), team(specials)],
+                false => [Lead::default(), Lead::default()],
+            };
         }
-        self.seen = Some(now);
-        &self.entered
+        (self.seen, self.apart) = (Some(now), None);
+        let lead = &mut self.leads[usize::from(shown.tab == Tab::Special)];
+        if !lead.whole
+            && let Some(first) =
+                seated(shown).and_then(|seats| opened_with(&seats, shown.tab, roll))
+        {
+            *lead = Lead::all(&first);
+        }
+        lead
     }
 }
 
@@ -666,8 +856,8 @@ mod tests {
     };
 
     use super::{
-        Mark, Rank, Roll, Seat, Visit, Way, Words, for_formation, for_list, for_opponent,
-        for_record, names, next, ranked, roll, rows_to, school_place, way,
+        Lead, Mark, Rank, Roll, Seat, Visit, Way, Words, for_formation, for_list, for_opponent,
+        for_record, names, next, opened_with, ranked, roll, rows_to, school_place, way,
     };
     use crate::{
         formation::{Card, Formation, Tab},
@@ -889,10 +1079,179 @@ mod tests {
 
     const ENTERED: [i64; 6] = [1, 2, 3, 4, 201, 202];
 
+    /// The team the dialog opened with, all of it known.
+    fn opened() -> Lead {
+        Lead::all(&ENTERED)
+    }
+
+    /// The list of `listed`, its team of ranks apart: by rank 1 stands before every other
+    /// student as well, 2 to 4 after them all. The list's rows are the same.
+    fn apart() -> Roll {
+        let mut roll = listed();
+        for (id, bond) in [(2, 30), (3, 29), (4, 28)] {
+            roll.ranks.insert(id, rank(90, 5, bond));
+        }
+        roll
+    }
+
+    /// Cards on the measured grid, row by row from the first column of a row `down` rows
+    /// below the list's first one in sight.
+    fn grid(students: impl IntoIterator<Item = i64>) -> Vec<Card> {
+        students
+            .into_iter()
+            .zip(0..)
+            .map(|(student, place): (i64, usize)| Card {
+                student,
+                middle: (
+                    1144.0 + (place % 6) as f32 * 205.7,
+                    584.0 + (place / 6) as f32 * 282.0,
+                ),
+            })
+            .collect()
+    }
+
+    /// With nothing known of the team the dialog opened with, a card's column still tells
+    /// how many students stand first whose rank is after the card's: here 2, 3 and 4. They
+    /// may rank between the last card and the student sought, or after it: the rows are
+    /// told where both give the same row.
+    #[test]
+    fn the_rows_below_are_told_without_the_team_the_dialog_opened_with() {
+        let (roll, seen, nothing) = (apart(), seats(12, 23), Lead::default());
+        let rows = |student| rows_to(student, Way::Down, &seen, &nothing, Tab::Striker, &roll);
+        assert_eq!(rows(24), Some(1), "the next card");
+        assert_eq!(
+            rows(29),
+            Some(1),
+            "the last of the next row, whoever stands first"
+        );
+        assert_eq!(rows(30), None, "the next row, or this one's end");
+        assert_eq!(rows(32), None);
+        assert_eq!(rows(33), Some(2), "past the three that may stand first");
+        assert_eq!(rows(35), Some(2));
+        assert_eq!(rows(36), None);
+        assert_eq!(rows(39), Some(3));
+        // The team known, every one of them is told (as before).
+        let known = |student| rows_to(student, Way::Down, &seen, &opened(), Tab::Striker, &roll);
+        assert_eq!(
+            (known(30), known(32), known(36)),
+            (Some(2), Some(2), Some(3))
+        );
+        // One of the three known to stand first leaves two that may.
+        let partly = Lead {
+            known: vec![2],
+            whole: false,
+        };
+        let rows = |student| rows_to(student, Way::Down, &seen, &partly, Tab::Striker, &roll);
+        assert_eq!((rows(31), rows(32)), (None, Some(2)));
+    }
+
+    /// Upwards the first card's column tells the three whose rank is after it; of the four
+    /// places one is left, for a student whose rank is before it.
+    #[test]
+    fn the_rows_above_are_told_without_the_team_the_dialog_opened_with() {
+        let (roll, seen, nothing) = (apart(), seats(24, 35), Lead::default());
+        let rows = |student| rows_to(student, Way::Up, &seen, &nothing, Tab::Striker, &roll);
+        assert_eq!(rows(23), Some(1));
+        assert_eq!(
+            rows(18),
+            Some(1),
+            "the first of the row above, or its second"
+        );
+        assert_eq!(rows(17), None, "the row above, or the one before it");
+        assert_eq!(rows(16), Some(2));
+        assert_eq!(rows(12), Some(2));
+        assert_eq!(rows(11), None);
+        assert_eq!(rows(10), Some(3));
+        // A student known to stand first is in the first row: three rows up.
+        let partly = Lead {
+            known: vec![2],
+            whole: false,
+        };
+        assert_eq!(
+            rows_to(2, Way::Up, &seen, &partly, Tab::Striker, &roll),
+            Some(3)
+        );
+    }
+
+    /// A column that would have more students stand first than the team has places tells
+    /// that the cards are not the ranks' stretch.
+    #[test]
+    fn no_rows_are_told_where_more_would_stand_first_than_the_team_holds() {
+        let (roll, nothing) = (apart(), Lead::default());
+        // Seven students rank before 16 (1, and 10 to 15): in the first column it would
+        // have five more before it.
+        assert_eq!(
+            rows_to(33, Way::Down, &seats(16, 27), &nothing, Tab::Striker, &roll),
+            None
+        );
+        // One student between two cards side by side stands first; five do not.
+        let one: Vec<Seat> = (12..=24).filter(|id| *id != 15).zip(0..).collect();
+        assert_eq!(
+            rows_to(39, Way::Down, &one, &nothing, Tab::Striker, &roll),
+            Some(3)
+        );
+        let five: Vec<Seat> = (12..=28)
+            .filter(|id| !(15..20).contains(id))
+            .zip(0..)
+            .collect();
+        assert_eq!(
+            rows_to(39, Way::Down, &five, &nothing, Tab::Striker, &roll),
+            None
+        );
+    }
+
+    /// The list's top shows who it opened with: the cards before the first one that every
+    /// student out of sight follows by rank.
+    #[test]
+    fn the_team_the_dialog_opened_with_is_read_off_the_lists_top() {
+        let roll = apart();
+        let top: Vec<Seat> = [1, 2, 3, 4, 10, 11, 12, 13, 14, 15, 16, 17]
+            .into_iter()
+            .zip(0..)
+            .collect();
+        assert_eq!(
+            opened_with(&top, Tab::Striker, &roll),
+            Some(vec![1, 2, 3, 4])
+        );
+        // A team of none: the list is the ranks' order from its first card on.
+        let mut plain = apart();
+        for id in 2..=4 {
+            plain.ranks.remove(&id);
+        }
+        let top: Vec<Seat> = [1].into_iter().chain(10..=20).zip(0..).collect();
+        assert_eq!(opened_with(&top, Tab::Striker, &plain), Some(Vec::new()));
+        // Not the top: students out of sight rank before the first card.
+        assert_eq!(opened_with(&seats(12, 23), Tab::Striker, &roll), None);
+        assert_eq!(opened_with(&seats(18, 29), Tab::Striker, &plain), None);
+        // A card of the first places not read: who stands there is not known.
+        let holed: Vec<Seat> = [1, 2, 4, 10, 11, 12]
+            .into_iter()
+            .zip([0, 1, 3, 4, 5, 6])
+            .collect();
+        assert_eq!(opened_with(&holed, Tab::Striker, &roll), None);
+        // The specials' list opens with two at most.
+        let mut specials = listed();
+        specials
+            .ranks
+            .extend((210..224).map(|id| (id, rank(90, 5, (250 - id) as u8))));
+        specials.specials.extend(210..224);
+        specials.ranks.insert(201, rank(90, 5, 1));
+        specials.ranks.insert(202, rank(90, 5, 60));
+        let top: Vec<Seat> = [201, 202, 210, 211, 212, 213]
+            .into_iter()
+            .zip(0..)
+            .collect();
+        assert_eq!(
+            opened_with(&top, Tab::Special, &specials),
+            Some(vec![201]),
+            "202 ranks first of the others as well"
+        );
+    }
+
     #[test]
     fn the_rows_to_a_student_below_are_counted_from_the_last_card() {
         let (roll, seen) = (listed(), seats(12, 23));
-        let rows = |student| rows_to(student, Way::Down, &seen, &ENTERED, Tab::Striker, &roll);
+        let rows = |student| rows_to(student, Way::Down, &seen, &opened(), Tab::Striker, &roll);
         assert_eq!(rows(24), Some(1), "the first card of the next row");
         assert_eq!(rows(29), Some(1), "the last card of the next row");
         assert_eq!(rows(30), Some(2), "the row after");
@@ -902,7 +1261,7 @@ mod tests {
             .into_iter()
             .zip(0..)
             .collect();
-        let rows = |student| rows_to(student, Way::Down, &top, &ENTERED, Tab::Striker, &roll);
+        let rows = |student| rows_to(student, Way::Down, &top, &opened(), Tab::Striker, &roll);
         assert_eq!(rows(18), Some(1));
         assert_eq!(rows(36), Some(4));
     }
@@ -910,7 +1269,7 @@ mod tests {
     #[test]
     fn the_rows_to_a_student_above_are_counted_from_the_first_card() {
         let (roll, seen) = (listed(), seats(24, 35));
-        let rows = |student| rows_to(student, Way::Up, &seen, &ENTERED, Tab::Striker, &roll);
+        let rows = |student| rows_to(student, Way::Up, &seen, &opened(), Tab::Striker, &roll);
         assert_eq!(rows(23), Some(1), "the last card of the row before");
         assert_eq!(rows(18), Some(1), "the first card of the row before");
         assert_eq!(rows(17), Some(2));
@@ -931,7 +1290,7 @@ mod tests {
             .into_iter()
             .zip(0..)
             .collect();
-        let rows = |student| rows_to(student, Way::Down, &seen, &ENTERED, Tab::Special, &roll);
+        let rows = |student| rows_to(student, Way::Down, &seen, &opened(), Tab::Special, &roll);
         assert_eq!(rows(214), Some(1));
         assert_eq!(rows(220), Some(2));
         assert_eq!(rows(24), None, "a striker is not of this tab");
@@ -944,16 +1303,16 @@ mod tests {
         let (roll, seen) = (listed(), seats(12, 23));
         let striker = Tab::Striker;
         assert_eq!(
-            rows_to(24, Way::Either, &seen, &ENTERED, striker, &roll),
+            rows_to(24, Way::Either, &seen, &opened(), striker, &roll),
             None
         );
         assert_eq!(
-            rows_to(77, Way::Down, &seen, &ENTERED, striker, &roll),
+            rows_to(77, Way::Down, &seen, &opened(), striker, &roll),
             None,
             "no rank"
         );
         assert_eq!(
-            rows_to(24, Way::Down, &[], &ENTERED, striker, &roll),
+            rows_to(24, Way::Down, &[], &opened(), striker, &roll),
             None,
             "no card read"
         );
@@ -961,7 +1320,7 @@ mod tests {
         let mut strange = seen.clone();
         strange[3].0 = 77;
         assert_eq!(
-            rows_to(24, Way::Down, &strange, &ENTERED, striker, &roll),
+            rows_to(24, Way::Down, &strange, &opened(), striker, &roll),
             None
         );
         // A student held whose level, stars or bond Aoi has not read stands somewhere.
@@ -970,7 +1329,7 @@ mod tests {
             ..listed()
         };
         assert_eq!(
-            rows_to(24, Way::Down, &seen, &ENTERED, striker, &partly),
+            rows_to(24, Way::Down, &seen, &opened(), striker, &partly),
             None
         );
     }
@@ -986,30 +1345,33 @@ mod tests {
         // 15 is not in the list (the cards close up): the ranks put it between 14 and 16.
         let closed: Vec<Seat> = (12..=24).filter(|id| *id != 15).zip(0..).collect();
         assert_eq!(
-            rows_to(30, Way::Down, &closed, &ENTERED, striker, &roll),
+            rows_to(30, Way::Down, &closed, &opened(), striker, &roll),
             None
         );
         // The ranks put 13 in the second column of its row, the screen in the first.
         let shifted = seats(13, 24);
         assert_eq!(
-            rows_to(30, Way::Down, &shifted, &ENTERED, striker, &roll),
+            rows_to(30, Way::Down, &shifted, &opened(), striker, &roll),
             None
         );
         assert_eq!(
-            rows_to(12, Way::Up, &shifted, &ENTERED, striker, &roll),
+            rows_to(12, Way::Up, &shifted, &opened(), striker, &roll),
             None
         );
         // The last row in sight is not read to its end: the student may stand in it.
         assert_eq!(
-            rows_to(17, Way::Down, &seats(12, 16), &ENTERED, striker, &roll),
+            rows_to(17, Way::Down, &seats(12, 16), &opened(), striker, &roll),
             None
         );
         // The first card read is not the first of its row.
         let late: Vec<Seat> = (25..=35).zip(1..).collect();
-        assert_eq!(rows_to(23, Way::Up, &late, &ENTERED, striker, &roll), None);
+        assert_eq!(rows_to(23, Way::Up, &late, &opened(), striker, &roll), None);
         // The team's cards in sight, but not all four of them.
         let cut: Vec<Seat> = [1, 2, 3, 10, 11, 12].into_iter().zip(0..).collect();
-        assert_eq!(rows_to(18, Way::Down, &cut, &ENTERED, striker, &roll), None);
+        assert_eq!(
+            rows_to(18, Way::Down, &cut, &opened(), striker, &roll),
+            None
+        );
     }
 
     /// A card that was not read leaves its place open among the cards in sight (on real
@@ -1030,64 +1392,67 @@ mod tests {
         // The card of 15 was not read: its place is open, and the ranks put 15 there.
         let open = without(12, 23, &[15]);
         assert_eq!(
-            rows_to(24, Way::Down, &open, &ENTERED, striker, &roll),
+            rows_to(24, Way::Down, &open, &opened(), striker, &roll),
             Some(1)
         );
         assert_eq!(
-            rows_to(30, Way::Down, &open, &ENTERED, striker, &roll),
+            rows_to(30, Way::Down, &open, &opened(), striker, &roll),
             Some(2)
         );
         let open = without(24, 35, &[27, 28]);
         assert_eq!(
-            rows_to(11, Way::Up, &open, &ENTERED, striker, &roll),
+            rows_to(11, Way::Up, &open, &opened(), striker, &roll),
             Some(3)
         );
         // The last card in sight was not read: the count runs from the last one read.
         let open = without(12, 23, &[23]);
         assert_eq!(
-            rows_to(24, Way::Down, &open, &ENTERED, striker, &roll),
+            rows_to(24, Way::Down, &open, &opened(), striker, &roll),
             Some(1)
         );
         assert_eq!(
-            rows_to(23, Way::Down, &open, &ENTERED, striker, &roll),
+            rows_to(23, Way::Down, &open, &opened(), striker, &roll),
             None,
             "in the end row"
         );
         // A place open where the ranks put no student, or two.
         let none: Vec<Seat> = (12..=22).zip([0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11]).collect();
         assert_eq!(
-            rows_to(30, Way::Down, &none, &ENTERED, striker, &roll),
+            rows_to(30, Way::Down, &none, &opened(), striker, &roll),
             None
         );
         let two: Vec<Seat> = [12, 13, 14, 17, 18, 19, 20, 21, 22, 23, 24]
             .into_iter()
             .zip([0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11])
             .collect();
-        assert_eq!(rows_to(30, Way::Down, &two, &ENTERED, striker, &roll), None);
+        assert_eq!(
+            rows_to(30, Way::Down, &two, &opened(), striker, &roll),
+            None
+        );
         // The ranks do not tell whether 16 stands in the open place or after it.
         let mut unsure = listed();
         let rank = unsure.ranks[&15].clone();
         unsure.ranks.insert(16, rank);
         let open = without(12, 23, &[15, 16]);
         assert_eq!(
-            rows_to(24, Way::Down, &open, &ENTERED, striker, &unsure),
+            rows_to(24, Way::Down, &open, &opened(), striker, &unsure),
             Some(1)
         );
         let open = without(12, 23, &[15]);
         assert_eq!(
-            rows_to(24, Way::Down, &open, &ENTERED, striker, &unsure),
+            rows_to(24, Way::Down, &open, &opened(), striker, &unsure),
             None
         );
         // A card of the team not read: who stands where among them is not known.
         let team: Vec<Seat> = [1, 2, 4, 10, 11].into_iter().zip([0, 1, 3, 4, 5]).collect();
         assert_eq!(
-            rows_to(18, Way::Down, &team, &ENTERED, striker, &roll),
+            rows_to(18, Way::Down, &team, &opened(), striker, &roll),
             None
         );
         // Places that do not rise are no stretch at all.
         let back: Vec<Seat> = vec![(12, 0), (13, 1), (14, 1)];
         assert_eq!(
-            rows_to(30, Way::Down, &back, &ENTERED, striker, &roll),
+            rows_to(30, Way::Down, &back, &opened(), striker, &roll),
             None
         );
     }
@@ -1108,38 +1473,38 @@ mod tests {
         // 24 and 25 stand in either order, both in the next row.
         let roll = alike(24, 25);
         assert_eq!(
-            rows_to(24, Way::Down, &seen, &ENTERED, striker, &roll),
+            rows_to(24, Way::Down, &seen, &opened(), striker, &roll),
             Some(1)
         );
         assert_eq!(
-            rows_to(26, Way::Down, &seen, &ENTERED, striker, &roll),
+            rows_to(26, Way::Down, &seen, &opened(), striker, &roll),
             Some(1)
         );
         // 29 and 30 stand in either order: the last of one row and the first of the next.
         let roll = alike(29, 30);
         assert_eq!(
-            rows_to(29, Way::Down, &seen, &ENTERED, striker, &roll),
+            rows_to(29, Way::Down, &seen, &opened(), striker, &roll),
             None
         );
         assert_eq!(
-            rows_to(30, Way::Down, &seen, &ENTERED, striker, &roll),
+            rows_to(30, Way::Down, &seen, &opened(), striker, &roll),
             None
         );
         assert_eq!(
-            rows_to(31, Way::Down, &seen, &ENTERED, striker, &roll),
+            rows_to(31, Way::Down, &seen, &opened(), striker, &roll),
             Some(2)
         );
         // The same upwards: 17 and 18 across the rows' bound, 19 and 20 within a row.
         let seen = seats(24, 35);
         let roll = alike(17, 18);
-        assert_eq!(rows_to(18, Way::Up, &seen, &ENTERED, striker, &roll), None);
+        assert_eq!(rows_to(18, Way::Up, &seen, &opened(), striker, &roll), None);
         assert_eq!(
-            rows_to(16, Way::Up, &seen, &ENTERED, striker, &roll),
+            rows_to(16, Way::Up, &seen, &opened(), striker, &roll),
             Some(2)
         );
         let roll = alike(19, 20);
         assert_eq!(
-            rows_to(19, Way::Up, &seen, &ENTERED, striker, &roll),
+            rows_to(19, Way::Up, &seen, &opened(), striker, &roll),
             Some(1)
         );
     }
@@ -1237,7 +1602,7 @@ mod tests {
         };
         // The attack keeps 1 and 2 and wants 30 (two rows below), then 11 (the row above).
         let attack = Some([1, 2, 30, 11, 201, 202]);
-        let marks = for_formation(&scrolled, None, attack, &ENTERED, &listed());
+        let marks = for_formation(&scrolled, None, attack, &opened(), &listed());
         assert_eq!(
             marks[2..],
             [
@@ -1256,7 +1621,7 @@ mod tests {
             placed: [Some(1), Some(2), Some(30), Some(4), Some(201), Some(202)],
             ..scrolled.clone()
         };
-        let marks = for_formation(&picked, None, attack, &ENTERED, &listed());
+        let marks = for_formation(&picked, None, attack, &opened(), &listed());
         assert_eq!(
             marks[1..],
             [
@@ -1276,7 +1641,7 @@ mod tests {
             whole: false,
             ..listed()
         };
-        let marks = for_formation(&scrolled, None, attack, &ENTERED, &partly);
+        let marks = for_formation(&scrolled, None, attack, &opened(), &partly);
         assert!(
             !marks.iter().any(|mark| matches!(mark, Mark::Rows { .. })),
             "{marks:?}"
@@ -1312,7 +1677,13 @@ mod tests {
                 placed: [Some(1), second, Some(3), None, Some(201), Some(203)],
                 ..shown()
             };
-            for_formation(&team, None, attack, &[1, 2, 3, 4], &told(ranks()))
+            for_formation(
+                &team,
+                None,
+                attack,
+                &Lead::all(&[1, 2, 3, 4]),
+                &told(ranks()),
+            )
         };
         assert_eq!(
             marks(None),
@@ -1337,7 +1708,7 @@ mod tests {
             &shown(),
             Some([301, 302, 303]),
             Some([1, 2, 8, 9, 201, 204]),
-            &[1, 2, 3, 4],
+            &Lead::all(&[1, 2, 3, 4]),
             &told(ranks()),
         );
         let guess = |student, x| Mark::Guess {
@@ -1370,7 +1741,7 @@ mod tests {
             &low,
             None,
             Some([1, 2, 3, 8, 201, 203]),
-            &[],
+            &Lead::all(&[]),
             &told(ranks()),
         );
         assert_eq!(
@@ -1383,7 +1754,13 @@ mod tests {
     #[test]
     fn the_other_tab_is_marked_once_this_one_is_done() {
         let attack = Some([1, 2, 3, 4, 201, 204]);
-        let marks = for_formation(&shown(), None, attack, &[1, 2, 3, 4], &told(ranks()));
+        let marks = for_formation(
+            &shown(),
+            None,
+            attack,
+            &Lead::all(&[1, 2, 3, 4]),
+            &told(ranks()),
+        );
         assert_eq!(
             marks,
             [
@@ -1398,7 +1775,13 @@ mod tests {
             cards: Vec::new(),
             ..shown()
         };
-        let marks = for_formation(&specials, None, attack, &[201, 203], &told(ranks()));
+        let marks = for_formation(
+            &specials,
+            None,
+            attack,
+            &Lead::all(&[201, 203]),
+            &told(ranks()),
+        );
         assert_eq!(
             marks[1],
             Mark::Seek {
@@ -1411,10 +1794,13 @@ mod tests {
 
     #[test]
     fn nothing_is_marked_without_counsel() {
-        assert_eq!(for_formation(&shown(), None, None, &[], &told(ranks())), []);
+        assert_eq!(
+            for_formation(&shown(), None, None, &Lead::all(&[]), &told(ranks())),
+            []
+        );
         let chosen = Some([1, 2, 3, 4, 201, 203]);
         assert_eq!(
-            for_formation(&shown(), None, chosen, &[], &told(ranks())),
+            for_formation(&shown(), None, chosen, &Lead::all(&[]), &told(ranks())),
             [],
             "the team stands as counselled"
         );
@@ -1432,15 +1818,118 @@ mod tests {
         );
     }
 
+    /// The dialog on the strikers' tab with the list of `apart`: the strikers placed, and
+    /// the cards in sight.
+    fn dialog(strikers: [Option<i64>; 4], cards: Vec<Card>) -> Formation {
+        let [first, second, third, fourth] = strikers;
+        Formation {
+            placed: [first, second, third, fourth, Some(201), Some(202)],
+            cards,
+            ..shown()
+        }
+    }
+
+    /// With nothing known of the team the dialog opened with, the rows are marked where the
+    /// cards in sight tell them whoever stands first.
     #[test]
-    fn the_team_entered_with_stays_while_the_dialog_is_open() {
-        let (start, mut visit) = (Instant::now(), Visit::default());
-        let team = |third| [Some(1), Some(2), third, None, None, None];
-        assert_eq!(visit.enter(&team(Some(3)), start), [1, 2, 3]);
-        let soon = start + Duration::from_secs(1);
-        assert_eq!(visit.enter(&team(None), soon), [1, 2, 3], "one taken out");
+    fn the_rows_are_marked_without_the_team_the_dialog_opened_with() {
+        let scrolled = dialog([Some(1), None, Some(3), None], grid(12..24));
+        // The attack has 33 (two rows below) for the second place.
+        let attack = Some([1, 33, 3, 30, 201, 202]);
+        let marks = for_formation(&scrolled, None, attack, &Lead::default(), &apart());
+        let seek = |student| Mark::Seek {
+            student,
+            way: Way::Down,
+            middle: (2232.0, 918.0),
+        };
+        assert_eq!(
+            marks,
+            [
+                seek(33),
+                Mark::Rows {
+                    rows: 2,
+                    middle: (2232.0, 918.0),
+                },
+            ]
+        );
+        // 30 stands in the next row or the one after, by who stands first: the way alone.
+        let attack = Some([1, 30, 3, 33, 201, 202]);
+        let marks = for_formation(&scrolled, None, attack, &Lead::default(), &apart());
+        assert_eq!(marks, [seek(30)]);
+    }
+
+    #[test]
+    fn a_dialog_seen_to_open_shows_its_team_first() {
+        let (start, mut visit, roll) = (Instant::now(), Visit::default(), apart());
+        let team = |third| dialog([Some(1), Some(2), third, None], grid(12..24));
+        // Other screens for a while, then the dialog: it opened under Rio's eyes.
+        visit.away(start);
+        let opened = start + Duration::from_secs(3);
+        let all = |known: &[i64]| Lead::all(known);
+        assert_eq!(*visit.enter(&team(Some(3)), &roll, opened), all(&[1, 2, 3]));
+        let soon = opened + Duration::from_secs(1);
+        assert_eq!(
+            *visit.enter(&team(None), &roll, soon),
+            all(&[1, 2, 3]),
+            "one taken out"
+        );
+        // The specials' tab shows the team's specials first.
+        let specials = Formation {
+            tab: Tab::Special,
+            cards: Vec::new(),
+            ..team(None)
+        };
+        assert_eq!(*visit.enter(&specials, &roll, soon), all(&[201, 202]));
+        // Closed, and opened anew with another team.
+        visit.away(soon + Duration::from_secs(1));
         let later = soon + Duration::from_secs(60);
-        assert_eq!(visit.enter(&team(Some(9)), later), [1, 2, 9], "opened anew");
+        assert_eq!(
+            *visit.enter(&team(Some(9)), &roll, later),
+            all(&[1, 2, 9]),
+            "opened anew"
+        );
+        // Nothing read for a while (the reading paused): what opened meanwhile was not seen.
+        let resumed = later + Duration::from_secs(60);
+        assert_eq!(
+            *visit.enter(&team(None), &roll, resumed),
+            Lead::default(),
+            "not seen to open"
+        );
+    }
+
+    /// A dialog already up when Rio first looks did not open under its eyes: whoever
+    /// stands in the team now, who it opened with is told by the list's top alone.
+    #[test]
+    fn a_dialog_up_before_rio_looked_tells_its_team_at_the_lists_top() {
+        let (start, mut visit, roll) = (Instant::now(), Visit::default(), apart());
+        // Two of the four were taken out before Rio looked, and the list is scrolled.
+        let team = [Some(1), None, Some(3), None];
+        let scrolled = dialog(team, grid(12..24));
+        assert_eq!(*visit.enter(&scrolled, &roll, start), Lead::default());
+        // A frame not read between two of the dialog is no opening.
+        visit.away(start + Duration::from_millis(300));
+        let soon = start + Duration::from_millis(400);
+        assert_eq!(*visit.enter(&scrolled, &roll, soon), Lead::default());
+        // The list's top comes in sight: the team the dialog opened with stands there.
+        let top = dialog(team, grid([1, 2, 3, 4, 10, 11, 12, 13, 14, 15, 16, 17]));
+        let then = soon + Duration::from_secs(1);
+        assert_eq!(*visit.enter(&top, &roll, then), Lead::all(&[1, 2, 3, 4]));
+        // It stays known with the list scrolled away again.
+        let after = then + Duration::from_secs(1);
+        assert_eq!(
+            *visit.enter(&scrolled, &roll, after),
+            Lead::all(&[1, 2, 3, 4])
+        );
+    }
+
+    /// A moment without the dialog as Rio starts is no proof that the dialog opened then.
+    #[test]
+    fn a_moment_without_the_dialog_is_no_opening() {
+        let (start, mut visit, roll) = (Instant::now(), Visit::default(), apart());
+        visit.away(start);
+        let scrolled = dialog([Some(1), None, Some(3), None], grid(12..24));
+        let soon = start + Duration::from_millis(200);
+        assert_eq!(*visit.enter(&scrolled, &roll, soon), Lead::default());
     }
 
     #[test]

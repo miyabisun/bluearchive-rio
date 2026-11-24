@@ -539,6 +539,9 @@ fn run(
             listing.point(overlay.as_ref().and_then(|_| pointer(&shot)));
         }
         let (dialog, forming) = (reader.front(frame), reader.formation(frame));
+        if forming.is_none() {
+            visit.away(now);
+        }
         if let Some(front) = dialog {
             met = Some((front, opponent::name(frame)));
             screen = Some(Screen::Opponent);
@@ -577,7 +580,7 @@ fn run(
                         shown,
                         behind,
                         choice.and_then(|choice| choice.attack),
-                        visit.enter(&shown.placed, now),
+                        visit.enter(shown, &roll, now),
                         &roll,
                     ),
                     None => behind.map_or_else(Vec::new, guide::for_opponent),
