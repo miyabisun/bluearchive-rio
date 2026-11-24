@@ -1,7 +1,8 @@
 //! What Rio marks over the game, on the measured screen (see `history`): the strikers the
 //! user takes to stand where the game shows "?", and in the formation dialog the cards to
-//! pick and to take out for the attack the user chose. Positions in the team are set after the
-//! dialog, by dragging: in it, the six students are only chosen. Over a battle record it
+//! take out and the card to pick next for the attack the user chose. A card picked takes the
+//! leftmost empty place, so the picks are told one at a time, each for that place; students
+//! who stood elsewhere before are moved after the dialog, by dragging. Over a battle record it
 //! says whether the record is kept, and over the list of records which rows' records are:
 //! the user's eyes stay on the game.
 
@@ -306,13 +307,11 @@ pub fn ranked(held: &[Held], students: &[Student]) -> HashMap<i64, Rank> {
     held.iter().filter_map(rank).collect()
 }
 
-/// The side of a sought student's icon, the middle of the first one near the list's top
-/// (to scroll up) and above the OK button (to scroll down), and the step to the next, to
-/// the left.
+/// The side of a sought student's icon, and its middle near the list's top (to scroll up)
+/// and above the OK button (to scroll down).
 pub(crate) const SEEK_SIDE: f32 = 100.0;
 const SEEK_UP: (f32, f32) = (2232.0, 455.0);
 const SEEK_DOWN: (f32, f32) = (2232.0, 918.0);
-const SEEK_STEP: f32 = 122.0;
 
 /// The way to a student the list does not show, from the cards it shows (in its order),
 /// the students placed when the dialog opened and the students' ranks.
@@ -542,10 +541,32 @@ pub fn for_opponent(behind: [i64; 3]) -> Vec<Mark> {
     guesses(behind, card, CARD_SIDE)
 }
 
+/// The student to pick next into the open tab's `places` of the team, for which the attack
+/// has the students `wanted`, place by place. The game puts a card picked into the leftmost
+/// empty place (the user's account of 2026-11-24, not measured), so the student the attack
+/// has for that place lands where the attack has it, whatever is taken out before or
+/// after. With no place empty, the leftmost one to be emptied counts. Where that place's
+/// student stands elsewhere in the team, it is the first of the attack's not placed.
+/// `None` once all of them stand.
+fn next(wanted: &[i64], places: &[Option<i64>]) -> Option<i64> {
+    let stands = |student: &&i64| places.contains(&Some(**student));
+    let leaves = |place: &Option<i64>| place.is_some_and(|student| !wanted.contains(&student));
+    let place = places
+        .iter()
+        .position(Option::is_none)
+        .or_else(|| places.iter().position(leaves));
+    place
+        .and_then(|place| wanted.get(place))
+        .filter(|student| !stands(student))
+        .or_else(|| wanted.iter().find(|student| !stands(student)))
+        .copied()
+}
+
 /// The marks over the formation dialog: the strikers the user takes to stand behind the
 /// front, and for the `attack` chosen (A1 to A4, then the specials) the cards to take out of the
-/// team, the cards of the open tab to pick, the students to scroll to (with how many rows
-/// away each is, where `roll` tells it for sure), and the other tab once this one is done.
+/// team, the one student of the open tab to pick next (see `next`): the card, or out of
+/// sight the way to scroll (with how many rows away, where `roll` tells it for sure), and
+/// the other tab once this one is done.
 pub fn for_formation(
     shown: &Formation,
     behind: Option<[i64; 3]>,
@@ -567,9 +588,9 @@ pub fn for_formation(
         }
     }
     let (strikers, specials) = attack.split_at(4);
-    let (wanted, others, other_tab) = match shown.tab {
-        Tab::Striker => (strikers, specials, TABS[1]),
-        Tab::Special => (specials, strikers, TABS[0]),
+    let (wanted, places, others, other_tab) = match shown.tab {
+        Tab::Striker => (strikers, &shown.placed[..4], specials, TABS[1]),
+        Tab::Special => (specials, &shown.placed[4..], strikers, TABS[0]),
     };
     let in_sight: Vec<i64> = shown.cards.iter().map(|card| card.student).collect();
     // The cards' places in the list's grid; none where a card lies off it.
@@ -581,38 +602,33 @@ pub fn for_formation(
             Some((card.student, row * COLUMNS + column))
         })
         .collect();
-    let (mut above, mut below) = (0.0, 0.0);
-    for student in wanted.iter().filter(|student| !placed(student)) {
-        if let Some(card) = shown.cards.iter().find(|card| card.student == *student) {
-            let ((x, y), (side, up, down)) = (card.middle, CARD_AROUND);
-            marks.push(Mark::Pick((
-                x - side,
-                (y - up).max(LIST.0),
-                x + side,
-                (y + down).min(LIST.1),
-            )));
-            continue;
-        }
-        let way = way(*student, &in_sight, entered, &roll.ranks);
-        let (first, taken) = match way {
-            Way::Up => (SEEK_UP, &mut above),
-            Way::Down | Way::Either => (SEEK_DOWN, &mut below),
+    let student = next(wanted, places);
+    let card = student.and_then(|student| shown.cards.iter().find(|card| card.student == student));
+    if let Some(card) = card {
+        let ((x, y), (side, up, down)) = (card.middle, CARD_AROUND);
+        marks.push(Mark::Pick((
+            x - side,
+            (y - up).max(LIST.0),
+            x + side,
+            (y + down).min(LIST.1),
+        )));
+    } else if let Some(student) = student {
+        let way = way(student, &in_sight, entered, &roll.ranks);
+        let middle = match way {
+            Way::Up => SEEK_UP,
+            Way::Down | Way::Either => SEEK_DOWN,
         };
         marks.push(Mark::Seek {
-            student: *student,
+            student,
             way,
-            middle: (first.0 - *taken * SEEK_STEP, first.1),
+            middle,
         });
         let rows = seats
             .as_deref()
-            .and_then(|seats| rows_to(*student, way, seats, entered, shown.tab, roll));
+            .and_then(|seats| rows_to(student, way, seats, entered, shown.tab, roll));
         if let Some(rows) = rows {
-            marks.push(Mark::Rows {
-                rows,
-                middle: (first.0 - *taken * SEEK_STEP, first.1),
-            });
+            marks.push(Mark::Rows { rows, middle });
         }
-        *taken += 1.0;
     }
     if wanted.iter().all(placed) && !others.iter().all(placed) {
         marks.push(Mark::Pick(other_tab));
@@ -651,7 +667,7 @@ mod tests {
 
     use super::{
         Mark, Rank, Roll, Seat, Visit, Way, Words, for_formation, for_list, for_opponent,
-        for_record, names, ranked, roll, rows_to, school_place, way,
+        for_record, names, next, ranked, roll, rows_to, school_place, way,
     };
     use crate::{
         formation::{Card, Formation, Tab},
@@ -1219,7 +1235,7 @@ mod tests {
             cards,
             ..shown()
         };
-        // The attack keeps 1 and 2 and wants 30 (two rows below) and 11 (the row above).
+        // The attack keeps 1 and 2 and wants 30 (two rows below), then 11 (the row above).
         let attack = Some([1, 2, 30, 11, 201, 202]);
         let marks = for_formation(&scrolled, None, attack, &ENTERED, &listed());
         assert_eq!(
@@ -1234,6 +1250,16 @@ mod tests {
                     rows: 2,
                     middle: (2232.0, 918.0),
                 },
+            ]
+        );
+        let picked = Formation {
+            placed: [Some(1), Some(2), Some(30), Some(4), Some(201), Some(202)],
+            ..scrolled.clone()
+        };
+        let marks = for_formation(&picked, None, attack, &ENTERED, &listed());
+        assert_eq!(
+            marks[1..],
+            [
                 Mark::Seek {
                     student: 11,
                     way: Way::Up,
@@ -1255,12 +1281,58 @@ mod tests {
             !marks.iter().any(|mark| matches!(mark, Mark::Rows { .. })),
             "{marks:?}"
         );
-        assert_eq!(marks.len(), 4);
+        assert_eq!(marks.len(), 3, "the two to take out, and the way to 30");
+    }
+
+    /// The game puts a card picked into the leftmost empty place of its squad, so the
+    /// student to pick is the one the attack has for that place, one at a time.
+    #[test]
+    fn the_next_pick_is_the_attacks_student_for_the_leftmost_empty_place() {
+        let wanted = [1, 9, 3, 8];
+        let next = |places: [Option<i64>; 4]| next(&wanted, &places);
+        assert_eq!(next([Some(1), None, Some(3), None]), Some(9), "the second");
+        assert_eq!(next([Some(1), Some(9), Some(3), None]), Some(8), "then");
+        assert_eq!(next([Some(1), Some(9), Some(3), Some(8)]), None, "done");
+        assert_eq!(next([None; 4]), Some(1), "an empty team, from the left");
+        // A student to take out beside it: a pick still lands in the empty place.
+        assert_eq!(next([Some(1), Some(4), Some(3), None]), Some(8));
+        assert_eq!(next([Some(1), None, Some(3), Some(4)]), Some(9));
+        // No place empty: the leftmost one to be emptied.
+        assert_eq!(next([Some(1), Some(2), Some(3), Some(4)]), Some(9));
+        // The place's student stands elsewhere: the first of the attack not placed.
+        assert_eq!(next([Some(9), None, Some(3), None]), Some(1));
+    }
+
+    #[test]
+    fn one_student_is_told_at_a_time() {
+        // The attack has 9 (out of sight) for the second place and 8 (in sight) for the fourth.
+        let attack = Some([1, 9, 3, 8, 201, 203]);
+        let marks = |second: Option<i64>| {
+            let team = Formation {
+                placed: [Some(1), second, Some(3), None, Some(201), Some(203)],
+                ..shown()
+            };
+            for_formation(&team, None, attack, &[1, 2, 3, 4], &told(ranks()))
+        };
+        assert_eq!(
+            marks(None),
+            [Mark::Seek {
+                student: 9,
+                way: Way::Down,
+                middle: (2232.0, 918.0),
+            }],
+            "the second place is the leftmost empty one: 8 waits, in sight as it is"
+        );
+        assert_eq!(
+            marks(Some(9)),
+            [Mark::Pick((1102.0, 654.0, 1298.0, 922.0))],
+            "9 stands: 8"
+        );
     }
 
     #[test]
     fn the_cards_to_pick_and_to_take_out_are_marked() {
-        // The attack keeps 1 and 2, and wants 8 (in sight) and 9 (not), with 201 and 204.
+        // The attack keeps 1 and 2, and wants 8 (in sight) then 9 (not), with 201 and 204.
         let marks = for_formation(
             &shown(),
             Some([301, 302, 303]),
@@ -1284,12 +1356,8 @@ mod tests {
                 Mark::Drop((645.5, 1026.5, 814.5, 1195.5)),
                 Mark::Drop((1046.5, 1026.5, 1215.5, 1195.5)),
                 // 8 is the second card of the second row; the list cuts the card's foot.
+                // 9 is told once 8 stands.
                 Mark::Pick((1102.0, 654.0, 1298.0, 922.0)),
-                Mark::Seek {
-                    student: 9,
-                    way: Way::Down,
-                    middle: (2232.0, 918.0),
-                },
             ]
         );
     }
