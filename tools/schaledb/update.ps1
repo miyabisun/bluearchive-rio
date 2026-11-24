@@ -1,6 +1,6 @@
 # Refreshes the SchaleDB snapshot Rio reads the students with: the students released in
 # Japan, sorted by Id, each with the squad it fights in (Main: striker, Support: special),
-# its class (role), attack type and armor type, and, where the name is not written in kana,
+# its class (role), attack type, armor type and school, and, where the name is not written in kana,
 # how it is read; their icons, the faces the game draws under a battle record's bars; and
 # the icons SchaleDB shows the classes and the types with. The tests and the app read only
 # this snapshot, never the network.
@@ -29,6 +29,7 @@ $lines = foreach ($student in $students) {
     role = $student.TacticRole
     attack = $student.BulletType
     armor = $student.ArmorType
+    school = $student.School
   }
   # A name with letters other than kana (the variant in brackets aside) cannot be found by
   # typing kana: SchaleDB's readings of the family and the personal name stand in for it.

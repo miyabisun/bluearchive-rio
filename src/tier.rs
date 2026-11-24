@@ -156,6 +156,7 @@ mod tests {
             role: Role::Tanker,
             attack: Attack::Pierce,
             armor: Armor::HeavyArmor,
+            school: String::new(),
             reading: None,
         };
         let ids = |found: Vec<&Student>| -> Vec<i64> { found.iter().map(|one| one.id).collect() };
@@ -205,6 +206,7 @@ mod tests {
             role: Role::Tanker,
             attack: Attack::Pierce,
             armor: Armor::HeavyArmor,
+            school: String::new(),
             reading: None,
         };
         let students: Vec<Student> = [5, 1, 4, 2, 3, 6].map(student).into();

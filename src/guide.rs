@@ -6,11 +6,14 @@
 //! the user's eyes stay on the game.
 
 use std::{
+    cmp::Ordering,
     collections::HashMap,
     time::{Duration, Instant},
 };
 
 use crate::{
+    Student,
+    aoi::Held,
     formation::{CARD_AROUND, FRONT_SIDE, Formation, HIDDEN, LIST, TABS, TEAM, TEAM_SIDE, Tab},
     history::Area,
     list::BUTTON,
@@ -152,14 +155,146 @@ pub fn for_list(rows: &[(f32, bool)], timed: bool) -> Vec<Mark> {
 }
 
 /// What the list orders a student by, after the students of the team as it stood when the
-/// dialog opened: the level, the stars, then the bond, the higher first. Five stars are
-/// the most (a weapon's stars do not count). Students alike in all three stand in an order
-/// Rio does not know (it may be the order they were met in).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// dialog opened: the level, the stars, then the bond, the higher first; among students
+/// alike in all three, the school in the game's order of schools (`SCHOOLS`), then the name
+/// as the game sorts names (`names`). Five stars are the most (a weapon's stars do not
+/// count). Measured on 2026-11-24 over the game's student list in its Lv order: 264 of the
+/// 265 neighbours of 266 students stand so, the other with a bond Aoi had read before it
+/// rose; the order the students were accepted in tells nothing (76 pairs one way, 77 the
+/// other), nor do the weapon, the skills, the equipment, the HP or the attack.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rank {
     pub level: u8,
     pub rarity: u8,
     pub bond: u8,
+    /// The school's place in `SCHOOLS`; `None` for a school not among them.
+    pub school: Option<u8>,
+    pub name: String,
+}
+
+impl Rank {
+    /// Where a student of this rank stands in the list against one of `other`: before it
+    /// (`Less`) or after it. `None` where the two are alike in level, stars and bond and
+    /// their schools or names do not tell.
+    pub fn against(&self, other: &Self) -> Option<Ordering> {
+        let key = |rank: &Self| (rank.level, rank.rarity, rank.bond);
+        match key(other).cmp(&key(self)) {
+            Ordering::Equal => match self.school?.cmp(&other.school?) {
+                Ordering::Equal => names(&self.name, &other.name),
+                decided => Some(decided),
+            },
+            decided => Some(decided),
+        }
+    }
+}
+
+/// The schools in the order the game's student list shows them sorted by school (学校),
+/// by SchaleDB's names for them: read from the game on 2026-11-24. A school the list did
+/// not show then (a collaboration's) is not placed.
+pub const SCHOOLS: [&str; 13] = [
+    "Hyakkiyako",
+    "RedWinter",
+    "Trinity",
+    "Gehenna",
+    "Abydos",
+    "Millennium",
+    "Arius",
+    "Shanhaijing",
+    "Valkyrie",
+    "WildHunt",
+    "SRT",
+    "Highlander",
+    "Odyssey",
+];
+
+/// A school's place in `SCHOOLS`.
+pub fn school_place(school: &str) -> Option<u8> {
+    let place = SCHOOLS.iter().position(|known| *known == school)?;
+    u8::try_from(place).ok()
+}
+
+/// Where the name `a` stands against `b` as the game sorts names, rising: before it
+/// (`Less`) or after it. Read from the game's student list sorted by name (名前) on
+/// 2026-11-24: a voiced or small kana counts as its plain one (アズサ before アスナ), a name
+/// that starts the other stands first (アズサ before アズサ（水着）), and kana stand before
+/// kanji (（バニーガール） before （制服）); over 102 names, the pairs told so were all the
+/// game's. `None` where the first difference is anything else (two kanji, which the game
+/// orders as JIS does, a sign, the long vowel mark), or there is none.
+pub fn names(a: &str, b: &str) -> Option<Ordering> {
+    let (mut a, mut b) = (a.chars().filter_map(plain), b.chars().filter_map(plain));
+    loop {
+        match (a.next(), b.next()) {
+            (None, None) => return None,
+            (None, Some(_)) => return Some(Ordering::Less),
+            (Some(_), None) => return Some(Ordering::Greater),
+            (Some(x), Some(y)) if x == y => {}
+            (Some(x), Some(y)) => {
+                return match (Letter::of(x), Letter::of(y)) {
+                    (Letter::Kana, Letter::Kana) => Some(x.cmp(&y)),
+                    (Letter::Kana, Letter::Kanji) => Some(Ordering::Less),
+                    (Letter::Kanji, Letter::Kana) => Some(Ordering::Greater),
+                    _ => None,
+                };
+            }
+        }
+    }
+}
+
+/// The voiced kana and the small ones, each over the plain kana it counts as.
+const MARKED: &str = "ガギグゲゴザジズゼゾダヂヅデドバビブベボパピプペポヴァィゥェォッャュョヮヵヶ";
+const PLAIN: &str = "カキクケコサシスセソタチツテトハヒフヘホハヒフヘホウアイウエオツヤユヨワカケ";
+
+/// A letter as the names' order sees it at first: hiragana as katakana, a voiced or small
+/// kana as its plain one; a voicing mark written apart is no letter.
+fn plain(letter: char) -> Option<char> {
+    let letter = match u32::from(letter) {
+        0x3099 | 0x309a => return None,
+        code @ 0x3041..=0x3096 => char::from_u32(code + 0x60)?,
+        _ => letter,
+    };
+    let marked = MARKED.chars().position(|marked| marked == letter);
+    Some(
+        marked
+            .and_then(|at| PLAIN.chars().nth(at))
+            .unwrap_or(letter),
+    )
+}
+
+/// What a letter is to the names' order.
+enum Letter {
+    Kana,
+    Kanji,
+    Other,
+}
+
+impl Letter {
+    fn of(letter: char) -> Self {
+        match u32::from(letter) {
+            0x30a1..=0x30fa => Self::Kana,
+            0x4e00..=0x9fff => Self::Kanji,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// The ranks of the students held, by id: the level, the stars and the bond as Aoi read
+/// them, the school and the name of the snapshot's student of that id (a student the
+/// snapshot lacks is of no known school). A student Aoi could not read all three of, or
+/// gave no id, has no rank.
+pub fn ranked(held: &[Held], students: &[Student]) -> HashMap<i64, Rank> {
+    let rank = |held: &Held| {
+        let id = held.id?;
+        let student = students.iter().find(|student| student.id == id);
+        let rank = Rank {
+            level: held.level?,
+            rarity: held.rarity?,
+            bond: held.bond?,
+            school: student.and_then(|student| school_place(&student.school)),
+            name: student.map_or_else(|| held.name.clone(), |student| student.name.clone()),
+        };
+        Some((id, rank))
+    };
+    held.iter().filter_map(rank).collect()
 }
 
 /// The side of a sought student's icon, the middle of the first one near the list's top
@@ -187,14 +322,16 @@ pub fn way(student: i64, cards: &[i64], entered: &[i64], rank: &HashMap<i64, Ran
     else {
         return Way::Either;
     };
-    // The cards in sight are a stretch of the order. A student alike its first card, and
-    // not its last, cannot stand after the stretch; and the other way around.
-    if own > first || (own == first && own != last) {
-        Way::Up
-    } else if own < last || (own == last && own != first) {
-        Way::Down
-    } else {
-        Way::Either
+    // The cards in sight are a stretch of the order, and the student is not among them:
+    // before its last card, the student stands before all of it; after its first, after
+    // all of it. Told both (the ranks are not the list's), or neither, the way is not known.
+    match (own.against(first), own.against(last)) {
+        (Some(Ordering::Less) | None, Some(Ordering::Less)) | (Some(Ordering::Less), None) => {
+            Way::Up
+        }
+        (Some(Ordering::Greater), Some(Ordering::Greater) | None)
+        | (None, Some(Ordering::Greater)) => Way::Down,
+        _ => Way::Either,
     }
 }
 
@@ -305,7 +442,8 @@ mod tests {
     };
 
     use super::{
-        Mark, Rank, Visit, Way, Words, for_formation, for_list, for_opponent, for_record, way,
+        Mark, Rank, Visit, Way, Words, for_formation, for_list, for_opponent, for_record, names,
+        ranked, school_place, way,
     };
     use crate::{
         formation::{Card, Formation, Tab},
@@ -317,6 +455,17 @@ mod tests {
             level,
             rarity,
             bond,
+            school: None,
+            name: String::new(),
+        }
+    }
+
+    /// A student alike every other of these tests' in level, stars and bond.
+    fn alike(school: &str, name: &str) -> Rank {
+        Rank {
+            school: school_place(school),
+            name: name.to_owned(),
+            ..rank(90, 5, 30)
         }
     }
 
@@ -353,6 +502,145 @@ mod tests {
             "a student of no known rank"
         );
         assert_eq!(way(9, &[]), Way::Either, "no card read");
+    }
+
+    /// The game's own name order, read from its student list sorted by name on 2026-11-24:
+    /// a voiced kana counts as its plain one, a name that starts another stands first, kana
+    /// stand before kanji; two kanji, signs and the long vowel mark are not decided.
+    #[test]
+    fn names_stand_as_the_game_sorts_them() {
+        use std::cmp::Ordering::{Greater, Less};
+        // Neighbours of the game's list, each standing before the next.
+        for pair in [
+            ["アイリ", "アイリ（バンド）"],
+            ["アイリ（バンド）", "アオバ"],
+            ["アズサ（水着）", "アスナ"],
+            ["カズサ（バンド）", "カスミ"],
+            ["ジュリ", "シュン"],
+            ["アズサ（レーシング）", "アズサ（水着）"],
+            ["アスナ（バニーガール）", "アスナ（制服）"],
+        ] {
+            assert_eq!(names(pair[0], pair[1]), Some(Less), "{pair:?}");
+            assert_eq!(names(pair[1], pair[0]), Some(Greater), "{pair:?}");
+        }
+        for pair in [
+            ["イズミ（水着）", "イズミ（正月）"],
+            ["シロコ（水着）", "シロコ＊テラー"],
+            ["マリー", "マリナ"],
+            ["ハス", "バス"],
+            ["ミカ", "ミカ"],
+        ] {
+            assert_eq!(names(pair[0], pair[1]), None, "{pair:?}");
+            assert_eq!(names(pair[1], pair[0]), None, "{pair:?}");
+        }
+    }
+
+    /// Students alike in level, stars and bond stand by their school in the game's order of
+    /// schools, and within a school by name (measured on 2026-11-24: 264 of 265 neighbours
+    /// of a list of 266, the other a bond Aoi had read before it rose).
+    #[test]
+    fn students_alike_stand_by_school_then_name() {
+        let ranks: HashMap<i64, Rank> = [
+            (11, alike("Hyakkiyako", "ワカモ")),
+            (12, alike("Trinity", "ミカ（水着）")),
+            (13, alike("Abydos", "シロコ（水着）")),
+            (14, alike("Abydos", "ノノミ")),
+            (15, alike("Abydos", "ホシノ（水着）")),
+            (16, rank(90, 5, 30)),
+            (17, alike("Tokiwadai", "ミサカ")),
+            (18, alike("Abydos", "シロコ＊テラー")),
+            (20, rank(90, 5, 50)),
+            (21, rank(80, 5, 20)),
+        ]
+        .into();
+        let way = |student, cards: &[i64]| way(student, cards, &[], &ranks);
+        assert_eq!(
+            way(11, &[12, 13, 14]),
+            Way::Up,
+            "a school before the first's"
+        );
+        assert_eq!(way(15, &[12, 13, 14]), Way::Down, "a name after the last's");
+        assert_eq!(
+            way(13, &[14]),
+            Way::Up,
+            "one card in sight, a name before it"
+        );
+        assert_eq!(
+            way(15, &[14]),
+            Way::Down,
+            "one card in sight, a name after it"
+        );
+        // The level, the stars and the bond still come first.
+        assert_eq!(way(20, &[12, 13]), Way::Up);
+        assert_eq!(way(21, &[12, 13]), Way::Down);
+        assert_eq!(way(15, &[20, 13]), Way::Down, "after the last, alike it");
+        assert_eq!(way(11, &[13, 21]), Way::Up, "before the first, alike it");
+        // A school or a name that does not tell: as before.
+        assert_eq!(
+            way(16, &[12, 13]),
+            Way::Either,
+            "a student of no known school"
+        );
+        assert_eq!(way(11, &[16]), Way::Either, "a card of no known school");
+        assert_eq!(
+            way(17, &[12, 13]),
+            Way::Either,
+            "a school the order was not read for"
+        );
+        assert_eq!(way(18, &[13]), Way::Either, "names that do not tell");
+        assert_eq!(
+            way(16, &[20, 12]),
+            Way::Down,
+            "alike the last, not the first"
+        );
+        assert_eq!(way(16, &[12, 21]), Way::Up, "alike the first, not the last");
+        // Between the first and the last and yet not in sight: the ranks are not the list's.
+        assert_eq!(way(13, &[12, 15]), Way::Either);
+        assert_eq!(way(13, &[15, 12]), Way::Either, "a stretch out of order");
+    }
+
+    /// A student's rank is the level, the stars and the bond Aoi read, with the school and
+    /// the name of the snapshot's student of that id; one Aoi could not read in full, or
+    /// without an id, has none.
+    #[test]
+    fn ranks_join_aois_reading_with_the_snapshot() {
+        let held = |id: Option<i64>, level: Option<u8>| crate::aoi::Held {
+            id,
+            name: "名簿の名前".to_owned(),
+            level,
+            rarity: Some(5),
+            bond: Some(30),
+        };
+        let students = crate::students();
+        let wakamo = students.iter().find(|s| s.name == "ワカモ").unwrap().id;
+        let ranks = ranked(
+            &[
+                held(Some(wakamo), Some(90)),
+                held(Some(10005), None),
+                held(None, Some(90)),
+                held(Some(99_999), Some(90)),
+            ],
+            &students,
+        );
+        assert_eq!(ranks.len(), 2, "{ranks:?}");
+        let known = &ranks[&wakamo];
+        assert_eq!((known.level, known.rarity, known.bond), (90, 5, 30));
+        assert_eq!(known.school, school_place("Hyakkiyako"));
+        assert_eq!(known.name, "ワカモ");
+        // Newer than the snapshot: ordered by the level, the stars and the bond alone.
+        assert_eq!(ranks[&99_999].school, None);
+    }
+
+    /// Every school of the snapshot but a collaboration's has its place in the game's order.
+    #[test]
+    fn the_schools_of_the_snapshot_have_their_places() {
+        let unplaced: std::collections::BTreeSet<String> = crate::students()
+            .into_iter()
+            .filter(|student| school_place(&student.school).is_none())
+            .map(|student| student.school)
+            .collect();
+        let unplaced: Vec<&str> = unplaced.iter().map(String::as_str).collect();
+        assert_eq!(unplaced, ["ETC", "Sakugawa", "Tokiwadai"]);
     }
 
     /// The strikers' tab at the list's top: the team first, then 5 to 8.

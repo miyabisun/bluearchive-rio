@@ -160,6 +160,8 @@ pub struct Student {
     pub role: Role,
     pub attack: Attack,
     pub armor: Armor,
+    /// The school, by SchaleDB's name for it (`guide::SCHOOLS` has the game's order of them).
+    pub school: String,
     /// How the name is read, where it is not written in kana (初音ミク: はつねミク).
     pub reading: Option<String>,
 }

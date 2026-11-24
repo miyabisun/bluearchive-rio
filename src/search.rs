@@ -83,6 +83,7 @@ mod tests {
             role,
             attack,
             armor,
+            school: String::new(),
             reading: None,
         }
     }
