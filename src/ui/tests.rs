@@ -20,7 +20,7 @@ use crate::{
     opponent::Front,
     settings::{Settings, ThemeChoice},
     source::{Reported, Source},
-    store::{Counsel, Fought, Ground, Kept, Likely, Player, Registered, Store, Tried},
+    store::{Counsel, Fought, Ground, Kept, Likely, Moment, Player, Registered, Store, Tried, Who},
     tier::Tier,
     watch::{Choice, Opponent, Screen, Status},
 };
@@ -151,6 +151,7 @@ fn opponent() -> Opponent {
     let own = Likely {
         rest: BEHIND[0],
         ground: Ground::Theirs,
+        again: None,
         their_last: Some("2026-11-17".to_owned()),
         others: 0,
         others_before: 0,
@@ -161,6 +162,7 @@ fn opponent() -> Opponent {
     let others = Likely {
         rest: BEHIND[1],
         ground: Ground::Trend,
+        again: None,
         their_last: None,
         others: 2,
         others_before: 0,
@@ -637,6 +639,37 @@ fn barring_another_student_keeps_the_attack_chosen(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_hidden_opponents_own_defense_stands_first_under_its_heading(cx: &mut TestAppContext) {
+    let (_, core, vcx) = open(cx);
+    set(&core, vcx, |snapshot| {
+        // The defense a player hiding their name used at 14:05, taken for the opponent's.
+        let mut met = opponent();
+        (
+            met.counsel.likely[0].ground,
+            met.counsel.likely[0].their_last,
+        ) = (Ground::Again, None);
+        met.counsel.likely[0].again = Some(Moment {
+            at: 0,
+            time: "14:05".to_owned(),
+        });
+        snapshot.opponent = Some(met);
+    });
+    let (heading, own, trend) = (
+        bounds(vcx, "ground:likely-0").expect("the heading of the opponent's own"),
+        bounds(vcx, "candidate:likely-0").expect("the defense taken for the opponent's"),
+        bounds(vcx, "ground:likely-1").expect("the trend's heading"),
+    );
+    assert!(shows(vcx, "本人が使ったと考えられる編成"));
+    assert!(
+        shows(vcx, "匿名 14:05"),
+        "when the hidden player was fought"
+    );
+    let heading_text = bounds(vcx, "text:本人が使ったと考えられる編成").expect("the heading");
+    assert!(heading.top() <= heading_text.top() && heading_text.bottom() <= own.top());
+    assert!(heading.top() < own.top() && own.top() < trend.top());
+}
+
+#[gpui::test]
 fn an_attack_with_a_student_not_held_is_set_aside(cx: &mut TestAppContext) {
     let (_, core, vcx) = open(cx);
     set(&core, vcx, |snapshot| {
@@ -963,7 +996,7 @@ fn a_formation_is_registered_once_it_is_whole_and_shows_against_its_front(cx: &m
     });
     let registered = |core: &Core| {
         let records = Store::open(&core.places.database).unwrap();
-        records.counsel(&FRONT, None, 0).unwrap().likely
+        records.counsel(&FRONT, Who::Untold, 0).unwrap().likely
     };
     // Nothing is told with this one: the fields of the record emptied.
     tell(&rio, vcx, ["", "", ""]);

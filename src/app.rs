@@ -14,7 +14,7 @@ use futures::channel::mpsc::UnboundedSender;
 
 use crate::{
     source::Source,
-    store::{Amended, Kept, Registered, Store},
+    store::{Amended, Kept, Registered, Store, Who},
     tier::Tier,
     update,
     watch::{self, Choice, Opponent, Status, Update},
@@ -260,8 +260,8 @@ impl Core {
         let Some(mut opponent) = self.snapshot().opponent else {
             return Ok(());
         };
-        let (front, name) = (opponent.front, opponent.name.as_ref());
-        opponent.counsel = (store.counsel(&front, name, watch::clock())).map_err(not_kept)?;
+        let (front, who) = (opponent.front, Who::of(opponent.name.as_ref()));
+        opponent.counsel = (store.counsel(&front, who, watch::clock())).map_err(not_kept)?;
         self.update(|snapshot| snapshot.opponent = Some(opponent));
         Ok(())
     }

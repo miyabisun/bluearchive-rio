@@ -88,10 +88,14 @@ pub fn status_view(status: &Status) -> StatusView {
 }
 
 /// Why a defense is likely behind an opponent's front, in the window's words, a part for
-/// each who used it: the day the opponent themself last did, the other players who do now
-/// (or, if none does, those who did before), the user. Players, never battles: see `Likely`.
+/// each who used it: the time a player hiding their name did, where that player is taken to
+/// be the opponent; the day the opponent themself last did; the other players who do now
+/// (or, if none does, those who did before); the user. Players, never battles: see `Likely`.
 pub fn basis(likely: &Likely) -> Vec<String> {
     let mut said = Vec::new();
+    if let Some(fought) = &likely.again {
+        said.push(format!("匿名 {}", fought.time));
+    }
     if let Some(day) = &likely.their_last {
         // "11-17" of "2026-11-17".
         said.push(format!("本人 {}", day.get(5..).unwrap_or(day)));
@@ -113,6 +117,7 @@ pub fn basis(likely: &Likely) -> Vec<String> {
 /// What the window calls the defenses standing on a ground.
 pub fn ground(ground: Ground) -> &'static str {
     match ground {
+        Ground::Again => "本人が使ったと考えられる編成",
         Ground::Theirs => "本人が使った編成（過去1か月）",
         Ground::Registered => "登録した編成",
         Ground::Trend => "流行（過去2週間）",
@@ -289,7 +294,7 @@ mod tests {
     };
     use crate::{
         source::Reported,
-        store::{Fought, Ground, Likely, Tried},
+        store::{Fought, Ground, Likely, Moment, Tried},
         tier::{Sorted, Tier},
         watch::{Screen, Status},
     };
@@ -340,6 +345,7 @@ mod tests {
         let mut likely = Likely {
             rest: [1, 2, 3],
             ground: Ground::Theirs,
+            again: None,
             their_last: Some("2026-11-17".to_owned()),
             others: 0,
             others_before: 0,
@@ -360,6 +366,16 @@ mod tests {
         assert_eq!(basis(&likely), ["自分の防衛"]);
         likely.registered = true;
         assert_eq!(basis(&likely), ["自分の防衛", "登録"], "registered by hand");
+        // A hidden player's, taken for the hidden opponent's own: when it was fought first.
+        let fought = Moment {
+            at: 0,
+            time: "14:05".to_owned(),
+        };
+        (likely.again, likely.others) = (Some(fought), 1);
+        assert_eq!(
+            basis(&likely),
+            ["匿名 14:05", "ほか 1人", "自分の防衛", "登録"]
+        );
     }
 
     #[test]

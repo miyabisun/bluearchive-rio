@@ -19,7 +19,7 @@ use bluearchive_rio::{
     history::Reader,
     mcp,
     opponent::{self, Front},
-    store::{Counsel, Kept, Player, Store},
+    store::{Counsel, Kept, Player, Store, Who},
     students, view, watch,
 };
 
@@ -219,7 +219,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     Some(front) => {
                         let name = opponent::name(&screen);
                         let now = watch::clock();
-                        let counsel = store.counsel(&front, name.as_ref(), now)?;
+                        let counsel = store.counsel(&front, Who::of(name.as_ref()), now)?;
                         let told = foretell(&front, &counsel, held.as_deref(), &barred, &names);
                         println!("{path}: {told}");
                     }
@@ -306,6 +306,7 @@ mod tests {
         let likely = |rest, ground, others, attacks: Vec<Tried>| Likely {
             rest,
             ground,
+            again: None,
             their_last: (ground == Ground::Theirs).then(|| "2026-11-17".to_owned()),
             others,
             others_before: 0,

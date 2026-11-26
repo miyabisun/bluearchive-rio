@@ -15,7 +15,7 @@ use crate::{
     list::{self, ROW_ACROSS, ROW_TALL, Row, Shown},
     listing::{self, Band, Fight, Pointed, Told},
     opponent::Front,
-    store::{Counsel, Kept, Store},
+    store::{Counsel, Kept, Store, Who},
     tier::Tier,
 };
 
@@ -56,6 +56,25 @@ pub struct Opponent {
     /// The students held, as Aoi wrote them when the opponent came up; `None` where its
     /// file does not read: nobody is known to be missing then.
     pub held: Option<Vec<i64>>,
+}
+
+impl Opponent {
+    /// What was counselled, in a line for the trail: the front, whether the game names the
+    /// opponent, hides the name or told none, and where the first defense stands (so a
+    /// hidden opponent not taken for the hidden player just fought shows afterwards).
+    fn trail(&self) -> String {
+        let who = match Who::of(self.name.as_ref()) {
+            Who::Named(_) => "named",
+            Who::Hidden => "hidden",
+            Who::Untold => "untold",
+        };
+        let (front, first) = (self.front, self.counsel.likely.first());
+        let first = first.map(|likely| likely.ground);
+        format!(
+            "opponent: front {} {:?}; name {who}; first {first:?}",
+            front.first, front.specials
+        )
+    }
 }
 
 /// The defense the user takes an opponent to have behind its front, and the attack the
@@ -495,8 +514,9 @@ fn run(
             if saved.new
                 && let Some(mut opponent) = counselled.take()
             {
-                let (front, name) = (&opponent.front, opponent.name.as_ref());
-                opponent.counsel = store.counsel(front, name, clock()).map_err(records)?;
+                let (front, who) = (&opponent.front, Who::of(opponent.name.as_ref()));
+                opponent.counsel = store.counsel(front, who, clock()).map_err(records)?;
+                trail.note(clock(), opponent.trail());
                 report(status.clone(), Some(Update::Opponent(opponent.clone())));
                 counselled = Some(opponent);
             }
@@ -552,14 +572,18 @@ fn run(
             // The name is the opponent's while the front is the one its dialog showed.
             let name = met.as_ref().filter(|(met, _)| *met == front);
             let name = name.and_then(|(_, name)| name.clone());
+            // Told anew for another opponent, and once what was told no longer holds (a
+            // hidden opponent taken for the one just fought, half an hour on).
             let same = |known: &Opponent| {
-                known.front == front && named_alike(known.name.as_ref(), name.as_ref())
+                known.front == front
+                    && named_alike(known.name.as_ref(), name.as_ref())
+                    && known.counsel.holds(clock())
             };
             if !counselled.as_ref().is_some_and(same) {
                 let held = aoi::held().ok();
                 roll = guide::roll(held.as_deref().unwrap_or_default(), &students);
                 let counsel = store
-                    .counsel(&front, name.as_ref(), clock())
+                    .counsel(&front, Who::of(name.as_ref()), clock())
                     .map_err(records)?;
                 let opponent = Opponent {
                     front,
@@ -567,6 +591,7 @@ fn run(
                     counsel,
                     held: held.map(|held| held.iter().filter_map(|one| one.id).collect()),
                 };
+                trail.note(clock(), opponent.trail());
                 report(status.clone(), Some(Update::Opponent(opponent.clone())));
                 counselled = Some(opponent);
             }

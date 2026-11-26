@@ -144,6 +144,9 @@ pub enum Amended {
 /// PvP has its trends, so what is used now says more than what was used most.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Ground {
+    /// The opponent hides their name, and a player hiding theirs defended so behind the
+    /// same front within `AGAIN`: taken to be the opponent, challenged again after a loss.
+    Again,
     /// The opponent defended so within `OWN`.
     Theirs,
     /// The user registered the defense by hand, with an attack told to win against it: a
@@ -157,6 +160,13 @@ pub enum Ground {
     Mine,
 }
 
+/// When a battle was: seconds since 1970, and the time of day in local time ("14:05").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Moment {
+    pub at: i64,
+    pub time: String,
+}
+
 /// A defense that may stand behind an opponent's front: the strikers D2 to D4, what the
 /// records say for it, and the attacks that won against it. Players are counted, never their
 /// battles: fighting one player again and again says no more of the others.
@@ -164,6 +174,9 @@ pub enum Ground {
 pub struct Likely {
     pub rest: [i64; 3],
     pub ground: Ground,
+    /// When a player hiding their name last defended so, where that player is taken to be
+    /// the opponent (see `Ground::Again`).
+    pub again: Option<Moment>,
     /// The day the opponent last defended so ("2026-11-17"), if they ever did.
     pub their_last: Option<String>,
     /// The other players (neither the opponent nor the user) who defended so within
@@ -185,6 +198,34 @@ pub struct Likely {
 pub const OWN: i64 = 30 * DAY;
 pub const TREND: i64 = 14 * DAY;
 const DAY: i64 = 24 * 3600;
+/// How long ago, in seconds, a battle against a player hiding their name is still taken to
+/// be against the opponent hiding theirs now (half an hour): one who lost tends to challenge
+/// the same player again at once.
+pub const AGAIN: i64 = 30 * 60;
+
+/// Who an opponent is, as far as the game tells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Who<'a> {
+    /// The game shows the name.
+    Named(&'a Plate),
+    /// The game hides it: in the name's place stands "匿名" (`Plate::hidden`). So it does
+    /// for a player who took the word for a name, whom the dialog's name does not tell
+    /// from one hiding theirs.
+    Hidden,
+    /// No name was read: a formation dialog met without the opponent's before it.
+    Untold,
+}
+
+impl<'a> Who<'a> {
+    /// The opponent of the name an opponent's dialog showed, if one was read.
+    pub fn of(name: Option<&'a Plate>) -> Self {
+        match name {
+            None => Self::Untold,
+            Some(name) if name.hidden() => Self::Hidden,
+            Some(name) => Self::Named(name),
+        }
+    }
+}
 
 /// How many candidates are listed: of the defenses, and of the attacks against each.
 pub const SHOWN: usize = 5;
@@ -195,6 +236,16 @@ pub const SHOWN: usize = 5;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Counsel {
     pub likely: Vec<Likely>,
+}
+
+impl Counsel {
+    /// Whether the counsel told before still holds at the time `now`: not once the battle
+    /// a hidden opponent was taken to have fought is longer ago than `AGAIN`. (The other
+    /// grounds tell of days: they are told anew with the next opponent.)
+    pub fn holds(&self, now: i64) -> bool {
+        let mut fought = (self.likely.iter()).filter_map(|likely| likely.again.as_ref());
+        fought.all(|fought| now - fought.at <= AGAIN)
+    }
 }
 
 /// The columns of a registration beside its students: what it was told with (`Source`).
@@ -250,30 +301,36 @@ pub fn both(mut attack: [i64; 6], mut defense: [i64; 6]) -> [i64; 12] {
 }
 
 /// A battle behind a front, for telling the defenses likely there: who defended, with whom
-/// behind the first striker, and when (seconds since 1970, and the day in local time).
+/// behind the first striker, and when (seconds since 1970, and the day and the time of day
+/// in local time).
 struct Defended {
     defender: Option<i64>,
     rest: [i64; 3],
     at: i64,
     day: String,
+    time: String,
 }
 
-/// The defenses of `defended`, the likeliest at the time `now` first (see `Ground`): those
-/// the `opponent` used within `OWN`, the one used last first; then the trend, by how many
-/// other players used a defense within `TREND`, then the one used last; then those only
-/// older battles tell, and those only the user's (`me`) do, the one used last first.
+/// The defenses of `defended` (in the order they were kept), the likeliest at the time
+/// `now` first (see `Ground`): of an opponent whose name the game hides (`hidden`), the one
+/// a player hiding theirs used last within `AGAIN`; those the `opponent` used within `OWN`,
+/// the one used last first; then the trend, by how many other players used a defense within
+/// `TREND`, then the one used last; then those only older battles tell, and those only the
+/// user's (`me`) do, the one used last first.
 fn likely(
     defended: &[Defended],
     registered: &[[i64; 3]],
-    opponent: Option<i64>,
+    (opponent, hidden): (Option<i64>, bool),
     me: Option<i64>,
     now: i64,
 ) -> Vec<Likely> {
-    /// What is found of one defense: when the opponent, any other player and the user last
-    /// used it, and the other players who did within `TREND` and ever (`None`: those the
-    /// game hides the names of).
+    /// What is found of one defense: the time of day the player taken for a hidden
+    /// opponent last used it (see `Ground::Again`), when the opponent, any other player and
+    /// the user last did, and the other players who did within `TREND` and ever (`None`:
+    /// those the game hides the names of).
     struct Found {
         rest: [i64; 3],
+        again: Option<Moment>,
         theirs: Option<(i64, String)>,
         other: Option<i64>,
         mine: Option<i64>,
@@ -287,6 +344,7 @@ fn likely(
         let known = known.unwrap_or_else(|| {
             found.push(Found {
                 rest,
+                again: None,
                 theirs: None,
                 other: None,
                 mine: None,
@@ -298,6 +356,12 @@ fn likely(
         });
         &mut found[known]
     }
+    // A battle a player hiding their name defended within `AGAIN`. Against an opponent
+    // hiding theirs, the one fought last (of two at one time, the one kept later) is taken
+    // to be against the opponent, and so are the others of them with its defense.
+    let recent = |battle: &&Defended| battle.defender.is_none() && now - battle.at <= AGAIN;
+    let again = (defended.iter().filter(recent)).max_by_key(|battle| battle.at);
+    let again = again.filter(|_| hidden);
     let mut found: Vec<Found> = Vec::new();
     for rest in registered {
         of(&mut found, *rest).registered = true;
@@ -306,6 +370,12 @@ fn likely(
         let found = of(&mut found, battle.rest);
         let later = |last: Option<i64>| last.is_none_or(|last| last < battle.at);
         match battle.defender {
+            None if recent(&battle) && again.is_some_and(|last| last.rest == battle.rest) => {
+                found.again = again.map(|last| Moment {
+                    at: last.at,
+                    time: last.time.clone(),
+                });
+            }
             Some(defender) if Some(defender) == opponent => {
                 if later(found.theirs.as_ref().map(|(at, _)| *at)) {
                     found.theirs = Some((battle.at, battle.day.clone()));
@@ -331,7 +401,9 @@ fn likely(
             let theirs = found.theirs.as_ref().map(|(at, _)| *at);
             let others = found.lately.len() as u32;
             // Where it stands, and what orders it among those standing there.
-            let (ground, order) = if theirs.is_some_and(|at| now - at <= OWN) {
+            let (ground, order) = if found.again.is_some() {
+                (Ground::Again, (0, None))
+            } else if theirs.is_some_and(|at| now - at <= OWN) {
                 (Ground::Theirs, (0, theirs))
             } else if found.registered {
                 (Ground::Registered, (others, found.other))
@@ -345,6 +417,7 @@ fn likely(
             let likely = Likely {
                 rest: found.rest,
                 ground,
+                again: found.again,
                 their_last: found.theirs.map(|(_, day)| day),
                 others,
                 others_before: found.ever.len() as u32 - others,
@@ -788,16 +861,14 @@ impl Store {
 
     /// What the records say against a front at the time `now` (seconds since 1970): the
     /// defenses that may stand behind it (see `likely`), each with the attacks that won
-    /// against it. `opponent` is the opponent's name where the game shows one.
-    pub fn counsel(
-        &self,
-        front: &Front,
-        opponent: Option<&Plate>,
-        now: i64,
-    ) -> rusqlite::Result<Counsel> {
+    /// against it.
+    pub fn counsel(&self, front: &Front, opponent: Who<'_>, now: i64) -> rusqlite::Result<Counsel> {
         let opponent = match opponent {
-            Some(plate) => self.known(plate)?,
-            None => None,
+            Who::Named(plate) => (self.known(plate)?, false),
+            // One who took the word for a name is known by it as any other player: the
+            // dialog writes both the same.
+            Who::Hidden => (self.known(Plate::word())?, true),
+            Who::Untold => (None, false),
         };
         let mut specials = front.specials;
         specials.sort_unstable();
@@ -805,7 +876,8 @@ impl Store {
         // of the game's list tells (the middle of the time the row allows); one opened from
         // no row kept, when Rio saw it (a record is of the last days).
         let mut defended = self.0.prepare(
-            "SELECT defender, d2, d3, d4, at, date(at, 'unixepoch', 'localtime') FROM (
+            "SELECT defender, d2, d3, d4, at, date(at, 'unixepoch', 'localtime'),
+                    strftime('%H:%M', at, 'unixepoch', 'localtime') FROM (
                  SELECT b.id, b.defender, b.d2, b.d3, b.d4,
                         COALESCE((l.earliest + l.latest) / 2,
                                  CAST(strftime('%s', b.seen_at, 'utc') AS INTEGER)) AS at
@@ -820,6 +892,7 @@ impl Store {
                     rest: [row.get(1)?, row.get(2)?, row.get(3)?],
                     at: row.get(4)?,
                     day: row.get(5)?,
+                    time: row.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -1209,7 +1282,7 @@ mod tests {
 
     use image::{GrayImage, Luma};
 
-    use super::{Amended, Ground, Likely, Player, Registered, Store, Tried, ranked};
+    use super::{Amended, Ground, Likely, Moment, Player, Registered, Store, Tried, Who, ranked};
     use crate::{
         history::{Battle, Fighter, Party, Plate},
         list::{Ago, Row, Unit},
@@ -1493,16 +1566,29 @@ mod tests {
 
     /// Keeps `battle` as one Rio saw `days` days before `NOW`.
     fn days_ago(store: &Store, days: i64, battle: &Battle) -> i64 {
+        seen_ago(store, days * DAY, battle)
+    }
+
+    /// Keeps `battle` as one Rio saw `seconds` seconds before `NOW`.
+    fn seen_ago(store: &Store, seconds: i64, battle: &Battle) -> i64 {
         let id = store.keep(battle).unwrap().id;
         let seen =
             "UPDATE battles SET seen_at = datetime(?2, 'unixepoch', 'localtime') WHERE id = ?1";
-        store.0.execute(seen, (id, NOW - days * DAY)).unwrap();
+        store.0.execute(seen, (id, NOW - seconds)).unwrap();
         id
+    }
+
+    /// Keeps a battle the user fought `minutes` minutes before `NOW` attacking a player the
+    /// game hides the name of, whose second striker is `second`.
+    fn hidden_ago(store: &Store, minutes: i64, damage: u32, second: i64) -> i64 {
+        let mut hidden = against(damage, 5, second);
+        hidden.defender.plate = None;
+        seen_ago(store, minutes * 60, &hidden)
     }
 
     /// What a counsel tells of each defense: its second striker, where it stands, and the
     /// other players of the trend and of before.
-    fn told(store: &Store, opponent: Option<&Plate>) -> Vec<(i64, Ground, u32, u32)> {
+    fn told(store: &Store, opponent: Who<'_>) -> Vec<(i64, Ground, u32, u32)> {
         let counsel = store.counsel(&FRONT, opponent, NOW).unwrap();
         let told = |likely: &Likely| {
             let others = (likely.others, likely.others_before);
@@ -1532,7 +1618,7 @@ mod tests {
             days_ago(&store, 20, &against(damage, player, 29005));
         }
         assert_eq!(
-            told(&store, Some(&plate(5))),
+            told(&store, Who::Named(&plate(5))),
             [
                 (29001, Ground::Theirs, 0, 0),
                 (20001, Ground::Trend, 2, 0),
@@ -1542,7 +1628,7 @@ mod tests {
             ],
             "what is used now comes before what more players used once; the user's own last"
         );
-        let counsel = store.counsel(&FRONT, Some(&plate(5)), NOW).unwrap();
+        let counsel = store.counsel(&FRONT, Who::Named(&plate(5)), NOW).unwrap();
         let day = |ago: i64| -> Option<String> {
             let day = "SELECT date(?1, 'unixepoch', 'localtime')";
             store
@@ -1558,8 +1644,8 @@ mod tests {
         assert_eq!(mine, [false, false, false, false, true]);
         // To a player not met, and to one without a name, the opponent is one of the other
         // players: their defense of three days ago is of the trend, by one player.
-        for opponent in [Some(plate(1)), None] {
-            let told = told(&store, opponent.as_ref());
+        for opponent in [Who::Named(&plate(1)), Who::Untold] {
+            let told = told(&store, opponent);
             let first: Vec<i64> = told.iter().map(|told| told.0).collect();
             assert_eq!(first, [20001, 29001, 29005, 29002, 28001]);
             assert_eq!(told[1], (29001, Ground::Trend, 1, 0));
@@ -1567,7 +1653,13 @@ mod tests {
         }
         // Another front: nothing.
         let unseen = Front { first: 1, ..FRONT };
-        assert!(store.counsel(&unseen, None, NOW).unwrap().likely.is_empty());
+        assert!(
+            store
+                .counsel(&unseen, Who::Untold, NOW)
+                .unwrap()
+                .likely
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1585,7 +1677,7 @@ mod tests {
             hidden.defender.plate = None;
             days_ago(&store, 2, &hidden);
         }
-        let told: Vec<(i64, u32)> = told(&store, None)
+        let told: Vec<(i64, u32)> = told(&store, Who::Untold)
             .iter()
             .map(|told| (told.0, told.2))
             .collect();
@@ -1594,6 +1686,111 @@ mod tests {
             [(32, 2), (31, 1), (33, 1)],
             "more players first, then the one used last: battles count for nothing"
         );
+    }
+
+    #[test]
+    fn a_hidden_opponent_is_taken_for_the_hidden_player_fought_within_half_an_hour() {
+        let store = store();
+        // A named player's defense of yesterday, and one of a player hiding their name the
+        // user fought ten minutes ago.
+        days_ago(&store, 1, &against(100, 3, 31));
+        hidden_ago(&store, 10, 200, 33);
+        assert_eq!(
+            told(&store, Who::Hidden),
+            [(33, Ground::Again, 0, 0), (31, Ground::Trend, 1, 0)],
+            "the opponent's own, before the trend: no other player's"
+        );
+        let counsel = store.counsel(&FRONT, Who::Hidden, NOW).unwrap();
+        let time: String = store
+            .0
+            .query_row(
+                "SELECT strftime('%H:%M', ?1, 'unixepoch', 'localtime')",
+                [NOW - 600],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let again: Vec<_> = (counsel.likely.iter())
+            .map(|likely| likely.again.clone())
+            .collect();
+        let fought = Moment {
+            at: NOW - 600,
+            time,
+        };
+        assert_eq!(again, [Some(fought), None], "when it was fought");
+        // Told so, it holds until the half hour is over; then it is to be told anew.
+        assert!(counsel.holds(NOW) && counsel.holds(NOW + 20 * 60));
+        assert!(!counsel.holds(NOW + 20 * 60 + 1));
+        // An opponent the game names, and one no name was read of, is not that player: the
+        // defense is one of the trend, by a player nobody can tell.
+        for opponent in [Who::Named(&plate(1)), Who::Untold] {
+            assert_eq!(
+                told(&store, opponent),
+                [(33, Ground::Trend, 1, 0), (31, Ground::Trend, 1, 0)]
+            );
+            let counsel = store.counsel(&FRONT, opponent, NOW).unwrap();
+            assert!(counsel.likely.iter().all(|likely| likely.again.is_none()));
+            assert!(counsel.holds(NOW + 40 * DAY), "nothing of it ages so");
+        }
+    }
+
+    #[test]
+    fn a_hidden_player_fought_longer_ago_or_behind_another_front_is_another_player() {
+        let store = store();
+        // Thirty-one minutes ago behind the front, and five ago behind another.
+        hidden_ago(&store, 31, 100, 33);
+        let mut apart = against(200, 5, 34);
+        apart.defender.plate = None;
+        apart.defender.team[0].student = 21000;
+        seen_ago(&store, 300, &apart);
+        assert_eq!(told(&store, Who::Hidden), [(33, Ground::Trend, 1, 0)]);
+        // Half an hour to the second still tells.
+        hidden_ago(&store, 30, 300, 35);
+        assert_eq!(
+            told(&store, Who::Hidden),
+            [(35, Ground::Again, 0, 0), (33, Ground::Trend, 1, 0)]
+        );
+    }
+
+    #[test]
+    fn only_the_defense_a_hidden_player_used_last_is_taken_for_the_opponents() {
+        let store = store();
+        hidden_ago(&store, 20, 100, 33);
+        hidden_ago(&store, 5, 200, 34);
+        assert_eq!(
+            told(&store, Who::Hidden),
+            [(34, Ground::Again, 0, 0), (33, Ground::Trend, 1, 0)],
+            "the earlier one stays another player's"
+        );
+        // Two at one time: the one kept later.
+        hidden_ago(&store, 2, 300, 35);
+        hidden_ago(&store, 2, 400, 36);
+        let first = told(&store, Who::Hidden)[0];
+        assert_eq!(first, (36, Ground::Again, 0, 0));
+    }
+
+    #[test]
+    fn the_battles_taken_for_a_hidden_opponents_are_not_another_players() {
+        let store = store();
+        // The same defense twice within the half hour: the opponent's own both times.
+        hidden_ago(&store, 25, 100, 33);
+        hidden_ago(&store, 10, 200, 33);
+        assert_eq!(told(&store, Who::Hidden), [(33, Ground::Again, 0, 0)]);
+        // A hidden player's of two days ago, and a named player's: other players, as ever.
+        hidden_ago(&store, 2 * 24 * 60, 300, 33);
+        assert_eq!(told(&store, Who::Hidden), [(33, Ground::Again, 1, 0)]);
+        days_ago(&store, 1, &against(400, 3, 33));
+        assert_eq!(told(&store, Who::Hidden), [(33, Ground::Again, 2, 0)]);
+    }
+
+    #[test]
+    fn a_player_who_took_the_word_for_a_name_is_still_known_by_it() {
+        let store = store();
+        // A record shows such a player with a picture of their own: a player as any other.
+        let mut named = against(100, 5, 33);
+        named.defender.plate = Some(Plate::word().clone());
+        days_ago(&store, 3, &named);
+        // Their dialog writes the word as a hidden player's does.
+        assert_eq!(told(&store, Who::Hidden), [(33, Ground::Theirs, 0, 0)]);
     }
 
     #[test]
@@ -1611,7 +1808,10 @@ mod tests {
         ] {
             days_ago(&store, days, &against(second as u32 * 100, 3, second));
         }
-        let first: Vec<i64> = told(&store, None).iter().map(|told| told.0).collect();
+        let first: Vec<i64> = told(&store, Who::Untold)
+            .iter()
+            .map(|told| told.0)
+            .collect();
         assert_eq!(first, [37, 36, 35, 34, 33], "the ones used last");
     }
 
@@ -1619,7 +1819,7 @@ mod tests {
     fn a_battle_was_when_its_row_of_the_list_tells_not_when_rio_saw_it() {
         let store = store();
         let id = days_ago(&store, 0, &against(100, 3, 31));
-        assert_eq!(told(&store, None), [(31, Ground::Trend, 1, 0)]);
+        assert_eq!(told(&store, Who::Untold), [(31, Ground::Trend, 1, 0)]);
         // Its row of the game's list tells twenty days ago: no trend of now.
         let then = NOW - 20 * DAY;
         let row = "INSERT INTO list_rows (attacked, won, earliest, latest, battle)
@@ -1628,7 +1828,7 @@ mod tests {
             .0
             .execute(row, (then - 3600, then + 3600, id))
             .unwrap();
-        assert_eq!(told(&store, None), [(31, Ground::Before, 0, 1)]);
+        assert_eq!(told(&store, Who::Untold), [(31, Ground::Before, 0, 1)]);
     }
 
     /// What a formation is registered with when nothing was told with it.
@@ -1665,7 +1865,7 @@ mod tests {
         );
         // No battle tells of this defense: it is likely because it was registered, and the
         // attack against it has no battle either.
-        let counsel = store.counsel(&FRONT, None, NOW).unwrap();
+        let counsel = store.counsel(&FRONT, Who::Untold, NOW).unwrap();
         assert_eq!(counsel.likely.len(), 1);
         let likely = &counsel.likely[0];
         assert_eq!(
@@ -1685,11 +1885,23 @@ mod tests {
             first: 20001,
             ..FRONT
         };
-        assert!(store.counsel(&other, None, NOW).unwrap().likely.is_empty());
+        assert!(
+            store
+                .counsel(&other, Who::Untold, NOW)
+                .unwrap()
+                .likely
+                .is_empty()
+        );
         // Taken away, by either order of the specials: what it was comes back.
         let gone = store.unregister(attack, defense).unwrap();
         assert_eq!(gone.map(|gone| (gone.id, gone.attack)), Some((id, again.0)));
-        assert!(store.counsel(&FRONT, None, NOW).unwrap().likely.is_empty());
+        assert!(
+            store
+                .counsel(&FRONT, Who::Untold, NOW)
+                .unwrap()
+                .likely
+                .is_empty()
+        );
         assert_eq!(store.unregister(attack, defense).unwrap(), None, "gone");
     }
 
@@ -1729,7 +1941,7 @@ mod tests {
         store
             .register([13, 8, 9, 10, 11, 12], defense, &bare())
             .unwrap();
-        let counsel = store.counsel(&FRONT, None, NOW).unwrap();
+        let counsel = store.counsel(&FRONT, Who::Untold, NOW).unwrap();
         let told: Vec<_> = (counsel.likely[0].attacks.iter())
             .map(|tried| (tried.attack[0], tried.registered, tried.reported))
             .collect();
@@ -1957,7 +2169,7 @@ mod tests {
         register(attack(16000), defense(31), told(10, 9));
         register(attack(8), defense(31), told(20, 18));
 
-        let counsel = store.counsel(&FRONT, Some(&plate(5)), NOW).unwrap();
+        let counsel = store.counsel(&FRONT, Who::Named(&plate(5)), NOW).unwrap();
         let grounds: Vec<_> = (counsel.likely.iter())
             .map(|likely| (likely.rest[0], likely.ground, likely.registered))
             .collect();
@@ -2022,7 +2234,7 @@ mod tests {
         store.save(&never).unwrap();
 
         let attacks = || -> Vec<(i64, u32, u32)> {
-            let counsel = store.counsel(&FRONT, None, NOW).unwrap();
+            let counsel = store.counsel(&FRONT, Who::Untold, NOW).unwrap();
             let tried = counsel.likely[0].attacks.iter();
             tried
                 .map(|tried| (tried.attack[0], tried.wins, tried.battles))

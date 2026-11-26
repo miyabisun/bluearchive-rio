@@ -1,10 +1,12 @@
 //! Cuts the references the reader compares a battle record with from screens showing
 //! one, into `data/`: the title, the attacker's sword and the defender's shield, the
-//! digits of the damage labels, and the "?" picture of an anonymous player.
+//! digits of the damage labels, and the "?" picture and the name ("匿名") of an anonymous
+//! player.
 //!   cargo run --example make_refs
 //! The screen is `tests/fixtures/history.png`: the attacker on the left, whose labels show
-//! every digit. The right side's labels are left out: the tests read them. The "?" is the
-//! defender's picture in `tests/fixtures/anonymous.png`, the opponent's dialog's title
+//! every digit. The right side's labels are left out: the tests read them. The "?" and "匿名"
+//! are the defender's picture and name in `tests/fixtures/anonymous.png` (the name is the
+//! word of the game, not a player's), the opponent's dialog's title
 //! that of `tests/fixtures/opponent.png`, and the formation dialog's (it lies in the same
 //! place) that of `tests/fixtures/formation.png`.
 //!
@@ -23,7 +25,7 @@
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont, point};
 use bluearchive_rio::{
     guide::{ROWS_UNIT, Words},
-    history::{digit_cells, icon_shape, role_shape, title_shape},
+    history::{self, digit_cells, icon_shape, role_shape, title_shape},
     list::{self, DIGIT_SIZE, DIGIT_WIDE, KANJI, KANJI_SIZE},
     opponent,
 };
@@ -225,6 +227,10 @@ fn main() {
         .expect("the fixture")
         .to_rgb8();
     save(icon_shape(&hidden, true), "anonymous");
+    save(
+        history::name(&hidden, true).map(|name| name.0),
+        "anonymous-name",
+    );
     let dialog = image::open("tests/fixtures/opponent.png")
         .expect("the fixture")
         .to_rgb8();

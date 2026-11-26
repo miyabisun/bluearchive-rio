@@ -1,6 +1,8 @@
-//! A trail of what the list of records told and of the row each record was taken for: a text
-//! file beside the database (`list-trail.log`), to find out afterwards why a row was told as
-//! it was. Rows, battles and players are written as their numbers: no name goes into it.
+//! A trail of what the list of records told, of the row each record was taken for and of
+//! what was counselled against an opponent: a text file beside the database
+//! (`list-trail.log`), to find out afterwards why a row was told as it was, or a defense
+//! stood where it did. Rows, battles, players and students are written as their numbers: no
+//! name goes into it.
 
 use std::{fs::File, io::Write, path::Path};
 

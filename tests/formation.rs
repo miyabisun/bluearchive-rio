@@ -4,8 +4,9 @@
 
 use bluearchive_rio::{
     formation::{Formation, Tab},
-    history::Reader,
+    history::{self, Reader},
     opponent::{self, Front},
+    store::Who,
 };
 use image::{RgbImage, imageops};
 
@@ -123,5 +124,32 @@ fn the_opponents_name_is_the_plate_of_the_battle_records() {
     for width in [1600, 1920] {
         let small = opponent::name(&drawn(&dialog, width)).expect("the name at {width}");
         assert!(small.same(&name), "the same name at {width}");
+    }
+}
+
+#[test]
+fn the_word_in_a_hidden_names_place_is_told_from_a_players_name() {
+    let (dialog, record) = (screen("opponent"), screen("anonymous"));
+    // A record writes the word for its defender, who hides their name, and the user's name.
+    let word = history::name(&record, true).expect("the word in the name's place");
+    assert!(word.hidden(), "匿名");
+    let user = history::name(&record, false).expect("the user's name");
+    assert!(!user.hidden(), "a player's name");
+    for width in [1600, 1920] {
+        let small = history::name(&drawn(&record, width), true).expect("the word at {width}");
+        assert!(small.hidden(), "匿名 at {width}");
+    }
+    // The dialog's own opponent shows a name, as long as the word.
+    let name = opponent::name(&dialog);
+    assert!(matches!(Who::of(name.as_ref()), Who::Named(_)), "a name");
+    assert_eq!(Who::of(None), Who::Untold, "no name read");
+    // The dialog writing the word where it writes the name: the record's line, laid there
+    // (no dialog of a player hiding their name was at hand).
+    let mut hiding = dialog.clone();
+    let line = imageops::crop_imm(&record, 1836, 312, 428, 52).to_image();
+    imageops::replace(&mut hiding, &line, 482, 487);
+    for width in [2370, 1920, 1600] {
+        let name = opponent::name(&drawn(&hiding, width));
+        assert_eq!(Who::of(name.as_ref()), Who::Hidden, "匿名 at {width}");
     }
 }

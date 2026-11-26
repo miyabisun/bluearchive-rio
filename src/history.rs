@@ -6,11 +6,13 @@
 //! (2026-11-17), scaled about the frame's middle; what is compared is brought to one size
 //! first, so a window of another size reads the same.
 //!
-//! The references in `data/` (the title, the two roles' pictures and the digits) are cut
-//! from a screen by `cargo run --example make_refs`; the students' faces are SchaleDB's icons.
+//! The references in `data/` (the title, the two roles' pictures, the digits, and the "?"
+//! and the word of a player hiding their name) are cut from screens by
+//! `cargo run --example make_refs`; the students' faces are SchaleDB's icons.
 
 use std::{
     ops::Range,
+    sync::LazyLock,
     time::{Duration, Instant},
 };
 
@@ -306,6 +308,13 @@ pub fn icon_shape(frame: &RgbImage, right: bool) -> Option<GrayImage> {
     Some(shape(&sheet.crop(ICON, shift(right))?, blue, ICON_SIZE))
 }
 
+/// The name a side of a record draws, for `make_refs` and the reader: of a player hiding
+/// theirs, the word the game writes in its place.
+pub fn name(frame: &RgbImage, right: bool) -> Option<Plate> {
+    let sheet = Sheet::of(frame)?;
+    plate(&sheet.crop(NAME, shift(right))?, sheet.scale)
+}
+
 fn shift(right: bool) -> f32 {
     if right { SIDE } else { 0.0 }
 }
@@ -456,6 +465,22 @@ impl Plate {
         }
         let b = imageops::resize(b, a.width(), a.height(), FilterType::Triangle);
         strays(a, &b) + strays(&b, a) <= PLATE_STRAYS
+    }
+
+    /// Whether the plate draws no player's name but "匿名", the word the game writes in the
+    /// place of the name of a player hiding theirs: an opponent's dialog tells such a
+    /// player so. (A record tells one by the "?" of the picture as well: `Reader::read`.)
+    pub fn hidden(&self) -> bool {
+        self.same(Self::word())
+    }
+
+    /// "匿名" as a name's plate.
+    pub(crate) fn word() -> &'static Plate {
+        static WORD: LazyLock<Plate> = LazyLock::new(|| {
+            Plate::from_png(include_bytes!("../data/anonymous-name.png"))
+                .expect("make_refs writes the references")
+        });
+        &WORD
     }
 
     /// The plate as a PNG, to keep.
@@ -740,7 +765,7 @@ impl Reader {
         let plate = if hidden >= LIKE {
             None
         } else if hidden <= UNLIKE {
-            Some(plate(&sheet.crop(NAME, shift(right))?, sheet.scale)?)
+            Some(name(frame, right)?)
         } else {
             return None;
         };
