@@ -156,6 +156,7 @@ fn opponent() -> Opponent {
         others: 0,
         others_before: 0,
         mine: false,
+        mine_before: false,
         registered: false,
         attacks: vec![tried(ATTACKS[0], 2, 3), tried(ATTACKS[1], 1, 2)],
     };
@@ -167,6 +168,7 @@ fn opponent() -> Opponent {
         others: 2,
         others_before: 0,
         mine: true,
+        mine_before: false,
         registered: false,
         attacks: Vec::new(),
     };

@@ -90,7 +90,8 @@ pub fn status_view(status: &Status) -> StatusView {
 /// Why a defense is likely behind an opponent's front, in the window's words, a part for
 /// each who used it: the time a player hiding their name did, where that player is taken to
 /// be the opponent; the day the opponent themself last did; the other players who do now
-/// (or, if none does, those who did before); the user. Players, never battles: see `Likely`.
+/// (or, if none does, those who did before); the user, who does now or did before. Players,
+/// never battles: see `Likely`.
 pub fn basis(likely: &Likely) -> Vec<String> {
     let mut said = Vec::new();
     if let Some(fought) = &likely.again {
@@ -107,6 +108,8 @@ pub fn basis(likely: &Likely) -> Vec<String> {
     }
     if likely.mine {
         said.push("自分の防衛".to_owned());
+    } else if likely.mine_before {
+        said.push("自分の防衛（2週間より前）".to_owned());
     }
     if likely.registered {
         said.push("登録".to_owned());
@@ -122,7 +125,6 @@ pub fn ground(ground: Ground) -> &'static str {
         Ground::Registered => "登録した編成",
         Ground::Trend => "流行（過去2週間）",
         Ground::Before => "それより前の記録",
-        Ground::Mine => "自分の防衛だけにある編成",
     }
 }
 
@@ -350,6 +352,7 @@ mod tests {
             others: 0,
             others_before: 0,
             mine: false,
+            mine_before: false,
             registered: false,
             attacks: Vec::new(),
         };
@@ -364,6 +367,10 @@ mod tests {
         assert_eq!(basis(&likely), ["ほか 1人（2週間より前）", "自分の防衛"]);
         likely.others_before = 0;
         assert_eq!(basis(&likely), ["自分の防衛"]);
+        // The user's of before the two weeks only, as the other players' of before.
+        (likely.mine, likely.mine_before) = (false, true);
+        assert_eq!(basis(&likely), ["自分の防衛（2週間より前）"]);
+        (likely.mine, likely.mine_before) = (true, false);
         likely.registered = true;
         assert_eq!(basis(&likely), ["自分の防衛", "登録"], "registered by hand");
         // A hidden player's, taken for the hidden opponent's own: when it was fought first.

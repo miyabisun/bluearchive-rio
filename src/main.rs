@@ -311,6 +311,7 @@ mod tests {
             others,
             others_before: 0,
             mine: false,
+            mine_before: false,
             registered: false,
             attacks,
         };

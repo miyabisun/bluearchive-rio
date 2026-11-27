@@ -152,12 +152,11 @@ pub enum Ground {
     /// The user registered the defense by hand, with an attack told to win against it: a
     /// defense going round.
     Registered,
-    /// Other players did within `TREND`: the trend.
+    /// Players other than the opponent did within `TREND`: the trend. The user is one of
+    /// them, a player as any other.
     Trend,
     /// Only battles before those times tell it.
     Before,
-    /// Only the user's own defense tells it.
-    Mine,
 }
 
 /// When a battle was: seconds since 1970, and the time of day in local time ("14:05").
@@ -169,7 +168,8 @@ pub struct Moment {
 
 /// A defense that may stand behind an opponent's front: the strikers D2 to D4, what the
 /// records say for it, and the attacks that won against it. Players are counted, never their
-/// battles: fighting one player again and again says no more of the others.
+/// battles: fighting one player again and again says no more of the others, and the user's
+/// own defense, attacked most of all, is one player's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Likely {
     pub rest: [i64; 3],
@@ -184,8 +184,11 @@ pub struct Likely {
     pub others: u32,
     /// The other players who did so before that only.
     pub others_before: u32,
-    /// Whether the user defended so.
+    /// Whether the user defended so within `TREND`: one player more of the trend, told
+    /// apart from `others`.
     pub mine: bool,
+    /// Whether the user did so before that only.
+    pub mine_before: bool,
     /// Whether the user registered the defense by hand.
     pub registered: bool,
     /// The attacks that won against it at least once, the best first: all of them, for
@@ -314,9 +317,9 @@ struct Defended {
 /// The defenses of `defended` (in the order they were kept), the likeliest at the time
 /// `now` first (see `Ground`): of an opponent whose name the game hides (`hidden`), the one
 /// a player hiding theirs used last within `AGAIN`; those the `opponent` used within `OWN`,
-/// the one used last first; then the trend, by how many other players used a defense within
-/// `TREND`, then the one used last; then those only older battles tell, and those only the
-/// user's (`me`) do, the one used last first.
+/// the one used last first; then the trend, by how many players other than the opponent used
+/// a defense within `TREND` (the user, `me`, is one of them), then the one used last; then
+/// those only older battles tell, the one used last first.
 fn likely(
     defended: &[Defended],
     registered: &[[i64; 3]],
@@ -400,19 +403,21 @@ fn likely(
         .map(|found| {
             let theirs = found.theirs.as_ref().map(|(at, _)| *at);
             let others = found.lately.len() as u32;
+            // The user is one player of the trend, however many battles tell their defense.
+            let mine = found.mine.is_some_and(|at| now - at <= TREND);
+            let players = others + u32::from(mine);
+            let last = found.other.max(found.mine);
             // Where it stands, and what orders it among those standing there.
             let (ground, order) = if found.again.is_some() {
                 (Ground::Again, (0, None))
             } else if theirs.is_some_and(|at| now - at <= OWN) {
                 (Ground::Theirs, (0, theirs))
             } else if found.registered {
-                (Ground::Registered, (others, found.other))
-            } else if others > 0 {
-                (Ground::Trend, (others, found.other))
-            } else if theirs.is_some() || found.other.is_some() {
-                (Ground::Before, (0, theirs.max(found.other)))
+                (Ground::Registered, (players, last))
+            } else if players > 0 {
+                (Ground::Trend, (players, last))
             } else {
-                (Ground::Mine, (0, found.mine))
+                (Ground::Before, (0, theirs.max(last)))
             };
             let likely = Likely {
                 rest: found.rest,
@@ -421,7 +426,8 @@ fn likely(
                 their_last: found.theirs.map(|(_, day)| day),
                 others,
                 others_before: found.ever.len() as u32 - others,
-                mine: found.mine.is_some(),
+                mine,
+                mine_before: found.mine.is_some() && !mine,
                 registered: found.registered,
                 attacks: Vec::new(),
             };
@@ -1534,6 +1540,15 @@ mod tests {
         battle
     }
 
+    /// A battle the user (the name of two strokes) defended in, with `second` as the second
+    /// striker, attacked by the player of a name of six strokes.
+    fn attacked(damage: u32, second: i64) -> Battle {
+        let mut own = against(damage, 2, second);
+        own.attacker.plate = Some(plate(6));
+        own.user_attacked = false;
+        own
+    }
+
     #[test]
     fn the_user_is_the_player_on_the_records_own_side() {
         let store = store();
@@ -1603,10 +1618,7 @@ mod tests {
         // The user's own defense behind the same front, attacked five times yesterday: more
         // records than of any other defense.
         for damage in [10, 20, 30, 40, 50] {
-            let mut own = against(damage, 2, 28001);
-            own.attacker.plate = Some(plate(6));
-            own.user_attacked = false;
-            days_ago(&store, 1, &own);
+            days_ago(&store, 1, &attacked(damage, 28001));
         }
         // The opponent's own of three days ago and of forty; a defense two other players
         // used within two weeks; one three others used, twenty days ago.
@@ -1622,11 +1634,12 @@ mod tests {
             [
                 (29001, Ground::Theirs, 0, 0),
                 (20001, Ground::Trend, 2, 0),
+                (28001, Ground::Trend, 0, 0),
                 (29005, Ground::Before, 0, 3),
                 (29002, Ground::Before, 0, 0),
-                (28001, Ground::Mine, 0, 0),
             ],
-            "what is used now comes before what more players used once; the user's own last"
+            "what is used now comes before what more players used once; the user's own is \
+             one player's, however often it was attacked"
         );
         let counsel = store.counsel(&FRONT, Who::Named(&plate(5)), NOW).unwrap();
         let day = |ago: i64| -> Option<String> {
@@ -1637,19 +1650,20 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(counsel.likely[0].their_last, day(3));
-        assert_eq!(counsel.likely[3].their_last, day(40));
+        assert_eq!(counsel.likely[4].their_last, day(40));
         assert_eq!(counsel.likely[1].their_last, None);
         assert_eq!(counsel.likely[0].rest, [29001, 20002, 20003]);
         let mine: Vec<bool> = counsel.likely.iter().map(|likely| likely.mine).collect();
-        assert_eq!(mine, [false, false, false, false, true]);
+        assert_eq!(mine, [false, false, true, false, false]);
         // To a player not met, and to one without a name, the opponent is one of the other
-        // players: their defense of three days ago is of the trend, by one player.
+        // players: their defense of three days ago is of the trend, by one player, after
+        // the user's of yesterday.
         for opponent in [Who::Named(&plate(1)), Who::Untold] {
             let told = told(&store, opponent);
             let first: Vec<i64> = told.iter().map(|told| told.0).collect();
-            assert_eq!(first, [20001, 29001, 29005, 29002, 28001]);
-            assert_eq!(told[1], (29001, Ground::Trend, 1, 0));
-            assert_eq!(told[3], (29002, Ground::Before, 0, 1));
+            assert_eq!(first, [20001, 28001, 29001, 29005, 29002]);
+            assert_eq!(told[2], (29001, Ground::Trend, 1, 0));
+            assert_eq!(told[4], (29002, Ground::Before, 0, 1));
         }
         // Another front: nothing.
         let unseen = Front { first: 1, ..FRONT };
@@ -1685,6 +1699,90 @@ mod tests {
             told,
             [(32, 2), (31, 1), (33, 1)],
             "more players first, then the one used last: battles count for nothing"
+        );
+    }
+
+    /// What a counsel tells of each defense as to the user: its second striker, where it
+    /// stands, the other players of the trend, and whether the user is of it or of before.
+    fn told_of_me(store: &Store) -> Vec<(i64, Ground, u32, bool, bool)> {
+        let counsel = store.counsel(&FRONT, Who::Untold, NOW).unwrap();
+        let told = |of: &Likely| (of.rest[0], of.ground, of.others, of.mine, of.mine_before);
+        counsel.likely.iter().map(told).collect()
+    }
+
+    #[test]
+    fn the_user_is_one_player_of_the_trend_whatever_the_battles() {
+        let store = store();
+        // The user's own defense (41), attacked five times three days ago. Other players':
+        // one of two players (42), one used five days ago (43), one used yesterday (44).
+        for damage in [1, 2, 3, 4, 5] {
+            days_ago(&store, 3, &attacked(damage * 10, 41));
+        }
+        days_ago(&store, 10, &against(100, 3, 42));
+        days_ago(&store, 10, &against(200, 4, 42));
+        days_ago(&store, 5, &against(300, 3, 43));
+        days_ago(&store, 1, &against(400, 4, 44));
+        // One another player used six days ago and the user eight: two players.
+        days_ago(&store, 6, &against(500, 5, 45));
+        days_ago(&store, 8, &attacked(600, 45));
+        assert_eq!(
+            told_of_me(&store),
+            [
+                (45, Ground::Trend, 1, true, false),
+                (42, Ground::Trend, 2, false, false),
+                (44, Ground::Trend, 1, false, false),
+                (41, Ground::Trend, 0, true, false),
+                (43, Ground::Trend, 1, false, false),
+            ],
+            "the user is one player more, not one for each battle; the number told of the \
+             other players stays theirs"
+        );
+    }
+
+    #[test]
+    fn the_users_defense_of_before_the_trend_is_of_before_as_any_players() {
+        let store = store();
+        // Twenty days ago the user defended so (51); other players twenty-five (52) and
+        // sixteen (53) days ago.
+        days_ago(&store, 20, &attacked(100, 51));
+        days_ago(&store, 25, &against(200, 3, 52));
+        days_ago(&store, 16, &against(300, 4, 53));
+        assert_eq!(
+            told_of_me(&store),
+            [
+                (53, Ground::Before, 0, false, false),
+                (51, Ground::Before, 0, false, true),
+                (52, Ground::Before, 0, false, false),
+            ],
+            "the one used last first, the user's among the others'"
+        );
+        // Used again two weeks ago to the second, it is of the trend, and not of before.
+        days_ago(&store, 14, &attacked(400, 51));
+        assert_eq!(told_of_me(&store)[0], (51, Ground::Trend, 0, true, false));
+    }
+
+    #[test]
+    fn of_the_registered_the_user_is_one_of_the_players_too() {
+        let store = store();
+        let defense = |second: i64| [20000, second, 20002, 20003, 20004, 20005];
+        for second in [61, 62] {
+            let attack = [1, 2, 3, 4, 5, 6];
+            store.register(attack, defense(second), &bare()).unwrap();
+        }
+        // One another player used yesterday; one another player and the user used, both
+        // longer ago: two players come before one.
+        days_ago(&store, 1, &against(100, 3, 61));
+        days_ago(&store, 5, &against(200, 4, 62));
+        days_ago(&store, 6, &attacked(300, 62));
+        let told: Vec<_> = (told_of_me(&store).iter())
+            .map(|told| (told.0, told.1, told.3))
+            .collect();
+        assert_eq!(
+            told,
+            [
+                (62, Ground::Registered, true),
+                (61, Ground::Registered, false)
+            ]
         );
     }
 
